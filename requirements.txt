@@ -1,0 +1,13 @@
+# Note: TensorFlow is not available for Python 3.14 yet
+# Use Python 3.11 or 3.12, or wait for TensorFlow to support Python 3.14
+# tensorflow
+pandas
+numpy
+yfinance
+jupyterlab
+scikit-learn
+praw
+requests
+xgboost
+td-ameritrade-python-api
+streamlit

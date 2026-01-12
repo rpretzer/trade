@@ -9,6 +9,8 @@ import numpy as np
 from datetime import datetime
 import os
 import time
+import sys
+import subprocess
 
 # Try importing TensorFlow/Keras for model predictions
 try:
@@ -144,10 +146,72 @@ def main():
     results_df = load_backtest_results(results_file)
     
     if results_df is None or results_df.empty:
-        st.warning("⚠️ No backtest results found. Please run backtest_strategy.py first.")
+        st.warning("⚠️ No backtest results found.")
         
-        if st.button("📊 Run Backtest Now"):
-            st.info("To run backtest, use: python backtest_strategy.py")
+        st.markdown("### 🚀 Run Backtest")
+        st.info("Run a backtest to generate data for the dashboard. This will process data, train the model, and generate backtest results.")
+        
+        col_run1, col_run2 = st.columns([1, 1])
+        
+        with col_run1:
+            st.markdown("#### Quick Run (Use Default Settings)")
+            if st.button("📊 Run Backtest with Defaults", type="primary", use_container_width=True):
+                with st.spinner("Running backtest with default settings... This may take several minutes."):
+                    try:
+                        result = subprocess.run(
+                            [sys.executable, 'backtest_strategy.py'],
+                            capture_output=True,
+                            text=True,
+                            timeout=600  # 10 minute timeout
+                        )
+                        if result.returncode == 0:
+                            st.success("✅ Backtest completed successfully!")
+                            st.rerun()  # Refresh to load new data
+                        else:
+                            st.error("❌ Backtest failed. See error details below.")
+                            st.code(result.stderr if result.stderr else result.stdout)
+                    except subprocess.TimeoutExpired:
+                        st.error("⏱️ Backtest timed out. Please run manually or check system resources.")
+                    except Exception as e:
+                        st.error(f"❌ Error running backtest: {e}")
+        
+        with col_run2:
+            st.markdown("#### Manual Run")
+            st.info("To run manually, use:")
+            st.code("python backtest_strategy.py", language="bash")
+            st.markdown("Or use the CLI:")
+            st.code("python main.py\n# Select option 3: Backtest Trading Strategy", language="bash")
+        
+        st.markdown("---")
+        st.markdown("### 📋 Prerequisites")
+        st.markdown("""
+        Before running backtests, ensure you have:
+        - ✅ Processed stock data (`processed_stock_data.csv`)
+        - ✅ Trained model (`lstm_price_difference_model.h5`)
+        - ✅ TensorFlow installed (requires Python 3.11 or 3.12)
+        """)
+        
+        # Check prerequisites
+        st.markdown("#### 🔍 Prerequisites Check")
+        prereq_col1, prereq_col2 = st.columns(2)
+        
+        with prereq_col1:
+            data_exists = os.path.exists(data_file)
+            model_exists = os.path.exists(model_file)
+            st.markdown(f"- Processed Data: {'✅' if data_exists else '❌'} `{data_file}`")
+            st.markdown(f"- Trained Model: {'✅' if model_exists else '❌'} `{model_file}`")
+        
+        with prereq_col2:
+            try:
+                import tensorflow
+                tf_available = True
+            except ImportError:
+                tf_available = False
+            
+            st.markdown(f"- TensorFlow: {'✅ Available' if tf_available else '❌ Not Available'}")
+            if not tf_available:
+                st.caption("Note: TensorFlow requires Python 3.11 or 3.12")
+        
         return
     
     # Calculate key metrics

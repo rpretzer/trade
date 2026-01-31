@@ -1,96 +1,220 @@
 """
 Trading API Module
-Connects to TD Ameritrade API for live trading
+Connects to Charles Schwab API for live trading
 Includes paper trading mode for safe testing
+
+Note: TD Ameritrade API was deprecated after Schwab's acquisition.
+This module now uses schwab-py (https://schwab-py.readthedocs.io/)
 """
 
 import os
 import json
 from datetime import datetime
 import time
+import asyncio
+import logging
+from exceptions import (
+    APIConnectionError, APIAuthenticationError, APIResponseError,
+    PriceNotAvailableError, StaleDataError, InvalidOrderError,
+    InsufficientFundsError, OrderRejectedError
+)
+from error_handling import CircuitBreaker, retry, RetryConfig, RateLimiter
 
-# Try importing TD Ameritrade client
+logger = logging.getLogger(__name__)
+
+# Try importing Schwab client
 try:
-    from td.client import TDClient
-    TD_AVAILABLE = True
+    from schwab.client import AsyncClient
+    from schwab.auth import client_from_token_file, client_from_manual_flow
+    SCHWAB_AVAILABLE = True
 except ImportError:
-    TD_AVAILABLE = False
-    print("Warning: TD Ameritrade client not available. Install with: pip install td-ameritrade-python-api")
+    SCHWAB_AVAILABLE = False
+    print("Warning: Schwab client not available. Install with: pip install schwab-py")
+    print("Note: TD Ameritrade API is deprecated. Schwab API requires Python 3.10+")
 
 class TradingAPI:
-    """Trading API wrapper for TD Ameritrade with paper trading support."""
+    """
+    Trading API wrapper for Charles Schwab API with paper trading support.
     
-    def __init__(self, paper_trading=True, client_id=None, redirect_uri='http://localhost', 
-                 account_id=None, credentials_path='td_credentials.json'):
+    Note: TD Ameritrade API was deprecated after Schwab's acquisition (May 2024).
+    This class now uses schwab-py library. Key differences:
+    - Tokens expire in 7 days (not 90 days)
+    - Must create new app (old TDA apps don't work)
+    - Uses async/await syntax
+    - Requires Python 3.10+
+    - Callback URL must use 127.0.0.1 (not localhost)
+    
+    See: https://schwab-py.readthedocs.io/en/latest/tda-transition.html
+    """
+    
+    def __init__(self, paper_trading=True, app_key=None, app_secret=None, 
+                 redirect_uri='http://127.0.0.1', account_id=None, 
+                 credentials_path='schwab_credentials.json'):
         """
         Initialize trading API.
         
         Args:
             paper_trading: If True, simulate trades without real money
-            client_id: TD Ameritrade client ID
-            redirect_uri: Redirect URI for OAuth
-            account_id: TD Ameritrade account ID
+            app_key: Schwab app key (from developer portal)
+            app_secret: Schwab app secret (from developer portal)
+            redirect_uri: Redirect URI for OAuth (must use 127.0.0.1, not localhost)
+            account_id: Schwab account ID (hash value)
             credentials_path: Path to credentials file
         """
         self.paper_trading = paper_trading
-        self.client_id = client_id or os.environ.get('TD_CLIENT_ID')
-        self.redirect_uri = redirect_uri or os.environ.get('TD_REDIRECT_URI', 'http://localhost')
-        self.account_id = account_id or os.environ.get('TD_ACCOUNT_ID')
         self.credentials_path = credentials_path
-        self.session = None
+        self.client = None
         self.trade_history = []
+
+        # Initialize circuit breakers
+        self._api_circuit_breaker = CircuitBreaker(
+            name="schwab_api",
+            failure_threshold=5,
+            recovery_timeout=60.0,
+            on_open=self._on_circuit_breaker_open
+        )
+
+        self._price_circuit_breaker = CircuitBreaker(
+            name="price_data",
+            failure_threshold=3,
+            recovery_timeout=30.0
+        )
+
+        # Initialize rate limiter (Schwab allows ~120 requests/minute)
+        self._rate_limiter = RateLimiter(
+            name="schwab_api",
+            rate=2.0,  # 2 requests per second = 120/minute
+            capacity=10  # Allow bursts of up to 10 requests
+        )
         
-        if not paper_trading and not TD_AVAILABLE:
-            raise ImportError("TD Ameritrade API not available. Use paper trading mode or install td-ameritrade-python-api")
+        # Try to load app credentials from encrypted storage if not provided
+        if not app_key or not app_secret:
+            try:
+                from credential_manager import CredentialManager
+                cred_manager = CredentialManager()
+                loaded_key, loaded_secret = cred_manager.load_credentials()
+                if loaded_key and loaded_secret:
+                    app_key = app_key or loaded_key
+                    app_secret = app_secret or loaded_secret
+            except ImportError as e:
+                logger.error(
+                    "CredentialManager not available. "
+                    "Install cryptography: pip install cryptography"
+                )
+            except Exception as e:
+                logger.error(f"Error loading credentials: {e}")
+        
+        self.app_key = app_key or os.environ.get('SCHWAB_APP_KEY')
+        self.app_secret = app_secret or os.environ.get('SCHWAB_APP_SECRET')
+        self.redirect_uri = redirect_uri or os.environ.get('SCHWAB_REDIRECT_URI', 'http://127.0.0.1')
+        self.account_id = account_id or os.environ.get('SCHWAB_ACCOUNT_ID')
+        
+        if not paper_trading and not SCHWAB_AVAILABLE:
+            raise ImportError("Schwab API not available. Use paper trading mode or install schwab-py (requires Python 3.10+)")
+
+    def _on_circuit_breaker_open(self, circuit_breaker):
+        """
+        Callback when circuit breaker opens.
+
+        Args:
+            circuit_breaker: CircuitBreaker instance that opened
+        """
+        logger.critical(
+            f"CIRCUIT BREAKER OPENED: {circuit_breaker.name} - "
+            f"API calls blocked for {circuit_breaker.recovery_timeout}s"
+        )
+        # Could trigger alerts here
+        # Could initiate emergency shutdown if critical
     
     def connect(self):
-        """Connect to TD Ameritrade API (or initialize paper trading mode)."""
+        """
+        Connect to Schwab API (or initialize paper trading mode).
+        
+        Note: Schwab tokens expire in 7 days. You must regenerate them
+        using the OAuth flow. See schwab-py documentation for details.
+        """
         if self.paper_trading:
             print("📝 Paper Trading Mode: All trades will be simulated")
-            self.session = None  # No API connection needed for paper trading
+            self.client = None  # No API connection needed for paper trading
             return True
         
-        if not TD_AVAILABLE:
-            print("Error: TD Ameritrade API not available")
+        if not SCHWAB_AVAILABLE:
+            print("Error: Schwab API not available")
+            print("Install with: pip install schwab-py")
+            print("Note: Requires Python 3.10+")
             return False
         
         try:
-            # Initialize TD Client
-            self.session = TDClient(
-                client_id=self.client_id,
-                redirect_uri=self.redirect_uri
-            )
-            
             # Try to load saved credentials
             if os.path.exists(self.credentials_path):
                 try:
-                    with open(self.credentials_path, 'r') as f:
-                        credentials = json.load(f)
-                        self.session.access_token = credentials.get('access_token')
-                        self.session.refresh_token = credentials.get('refresh_token')
-                except Exception:
-                    pass
+                    # schwab-py can load from token file
+                    self.client = client_from_token_file(
+                        self.credentials_path,
+                        self.app_key,
+                        self.app_secret
+                    )
+                    if self.client:
+                        print("✓ Connected to Schwab API using saved credentials")
+                        return True
+                except Exception as e:
+                    print(f"Warning: Could not load saved credentials: {e}")
+                    print("You may need to regenerate your token (they expire in 7 days)")
             
-            # Login (this will prompt for credentials if needed)
-            if not hasattr(self.session, 'access_token') or not self.session.access_token:
-                print("Please authenticate with TD Ameritrade...")
-                print("You may need to complete OAuth flow in your browser")
-                # Note: Full OAuth flow requires user interaction
-                # For now, we'll use paper trading mode
-                print("Switching to paper trading mode...")
+            # If no valid credentials, need to run OAuth flow
+            if not self.client:
+                print("⚠️  Schwab API Authentication Required")
+                print("=" * 70)
+                print("To connect to Schwab API:")
+                print("1. Create a new app at: https://developer.schwab.com")
+                print("2. Note: App approval can take multiple days")
+                print("3. Use 127.0.0.1 (not localhost) as callback URL")
+                print("4. Run the OAuth flow (requires browser interaction)")
+                print("5. Tokens expire in 7 days (not 90 days like TDA)")
+                print()
+                print("For now, switching to paper trading mode...")
+                print("See: https://schwab-py.readthedocs.io/en/latest/")
                 self.paper_trading = True
                 return True
             
             return True
             
         except Exception as e:
-            print(f"Error connecting to TD Ameritrade: {e}")
+            print(f"Error connecting to Schwab API: {e}")
             print("Switching to paper trading mode...")
             self.paper_trading = True
             return True
     
+    async def _get_account_balance_async(self):
+        """Async helper to get account balance from Schwab API."""
+        if not self.client:
+            return None
+        
+        try:
+            # Get all accounts
+            accounts_response = await self.client.get_accounts()
+            accounts = accounts_response.json()
+            
+            if accounts and len(accounts) > 0:
+                # Find the account (by hash if account_id provided)
+                account = accounts[0]
+                if self.account_id:
+                    account = next((a for a in accounts if a.get('hashValue') == self.account_id), account)
+                
+                if account:
+                    return {
+                        'available_funds': account.get('currentBalances', {}).get('cashAvailableForTrading', 0),
+                        'buying_power': account.get('currentBalances', {}).get('buyingPower', 0),
+                        'total_value': account.get('currentBalances', {}).get('totalValue', 0),
+                        'paper_trading': False
+                    }
+            return None
+        except Exception as e:
+            print(f"Error fetching account balance: {e}")
+            return None
+    
     def get_account_balance(self):
-        """Get account balance."""
+        """Get account balance (synchronous wrapper for async method)."""
         if self.paper_trading:
             # Simulated balance for paper trading
             return {
@@ -100,50 +224,211 @@ class TradingAPI:
                 'paper_trading': True
             }
         
-        try:
-            accounts = self.session.get_accounts(fields=['positions', 'orders'])
-            if accounts and len(accounts) > 0:
-                account = accounts[0] if not self.account_id else \
-                          next((a for a in accounts if a['securitiesAccount']['accountId'] == self.account_id), None)
-                
-                if account:
-                    securities = account['securitiesAccount']
-                    return {
-                        'available_funds': securities.get('currentBalances', {}).get('availableFunds', 0),
-                        'buying_power': securities.get('currentBalances', {}).get('buyingPower', 0),
-                        'total_value': securities.get('currentBalances', {}).get('totalValue', 0),
-                        'paper_trading': False
-                    }
+        if not self.client:
             return None
+        
+        try:
+            # Run async method in event loop
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If loop is already running, we need to use a different approach
+                # For now, return None and suggest using async methods
+                print("Warning: Cannot run async method in existing event loop")
+                print("Consider using async methods directly or running in a new thread")
+                return None
+            else:
+                return loop.run_until_complete(self._get_account_balance_async())
+        except RuntimeError:
+            # No event loop, create one
+            return asyncio.run(self._get_account_balance_async())
         except Exception as e:
             print(f"Error fetching account balance: {e}")
             return None
     
-    def get_position(self, symbol):
-        """Get current position for a symbol."""
-        if self.paper_trading:
-            # In paper trading, track positions in memory
-            # For simplicity, return no position
-            return {'quantity': 0, 'average_price': 0}
-        
+    async def _get_current_price_async(self, symbol):
+        """Async helper to get current price from Schwab API."""
+        if not self.client:
+            return None
+
         try:
-            accounts = self.session.get_accounts(fields=['positions'])
+            # Get quote from Schwab API
+            quote_response = await self.client.get_quote(symbol)
+            quote = quote_response.json() if hasattr(quote_response, 'json') else quote_response
+
+            if quote and symbol in quote:
+                quote_data = quote[symbol]
+                # Get last price or mark price
+                price = quote_data.get('lastPrice') or quote_data.get('mark')
+
+                if price and price > 0:
+                    return {
+                        'price': price,
+                        'timestamp': datetime.now(),
+                        'bid': quote_data.get('bidPrice'),
+                        'ask': quote_data.get('askPrice'),
+                        'volume': quote_data.get('totalVolume')
+                    }
+            return None
+        except Exception as e:
+            print(f"Error fetching price for {symbol}: {e}")
+            return None
+
+    def get_current_price(self, symbol, max_staleness_seconds=2):
+        """
+        Get current market price for a symbol.
+
+        Args:
+            symbol: Stock symbol
+            max_staleness_seconds: Maximum age of price data (default 2 seconds)
+
+        Returns:
+            float: Current price
+
+        Raises:
+            PriceNotAvailableError: If price cannot be fetched
+            StaleDataError: If price data is too old
+            APIConnectionError: If API connection fails
+        """
+        # Acquire rate limit token
+        if not self.paper_trading:
+            if not self._rate_limiter.acquire():
+                logger.warning(f"Rate limit reached for price fetch: {symbol}")
+                time.sleep(0.5)  # Brief wait before proceeding
+                self._rate_limiter.wait_and_acquire(timeout=5.0)
+
+        def _fetch_price():
+            if self.paper_trading:
+                # For paper trading, fetch from yfinance
+                try:
+                    import yfinance as yf
+                    ticker = yf.Ticker(symbol)
+                    info = ticker.info
+                    # Try multiple price fields
+                    price = info.get('currentPrice') or info.get('regularMarketPrice') or info.get('previousClose')
+                    if price and price > 0:
+                        return price
+                    raise PriceNotAvailableError(f"No valid price available for {symbol}")
+                except Exception as e:
+                    if isinstance(e, PriceNotAvailableError):
+                        raise
+                    raise PriceNotAvailableError(f"Error fetching price for {symbol}: {e}")
+
+            if not self.client:
+                raise APIConnectionError("API client not connected")
+
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    raise APIConnectionError("Cannot run async method in existing event loop")
+                else:
+                    price_data = loop.run_until_complete(self._get_current_price_async(symbol))
+            except RuntimeError:
+                price_data = asyncio.run(self._get_current_price_async(symbol))
+            except Exception as e:
+                if isinstance(e, (APIConnectionError, PriceNotAvailableError)):
+                    raise
+                raise APIConnectionError(f"Error fetching price for {symbol}: {e}")
+
+            if not price_data:
+                raise PriceNotAvailableError(f"No price data returned for {symbol}")
+
+            # Check staleness
+            age = (datetime.now() - price_data['timestamp']).total_seconds()
+            if age > max_staleness_seconds:
+                raise StaleDataError(
+                    f"Price for {symbol} is {age:.1f}s old (limit: {max_staleness_seconds}s)"
+                )
+
+            return price_data['price']
+
+        # Use circuit breaker for price fetches
+        try:
+            return self._price_circuit_breaker.call(_fetch_price)
+        except Exception as e:
+            logger.error(f"Failed to fetch price for {symbol}: {e}")
+            raise
+
+    async def _get_position_async(self, symbol):
+        """Async helper to get position from Schwab API."""
+        if not self.client:
+            return {'quantity': 0, 'average_price': 0}
+
+        try:
+            accounts_response = await self.client.get_accounts()
+            accounts = accounts_response.json()
+
             if accounts:
-                account = accounts[0] if not self.account_id else \
-                          next((a for a in accounts if a['securitiesAccount']['accountId'] == self.account_id), None)
-                
+                account = accounts[0]
+                if self.account_id:
+                    account = next((a for a in accounts if a.get('hashValue') == self.account_id), account)
+
                 if account:
-                    positions = account['securitiesAccount'].get('positions', [])
+                    positions = account.get('positions', [])
                     for pos in positions:
-                        if pos['instrument']['symbol'] == symbol:
+                        instrument = pos.get('instrument', {})
+                        if instrument.get('symbol') == symbol:
                             return {
-                                'quantity': pos['longQuantity'] - pos['shortQuantity'],
-                                'average_price': pos['averagePrice']
+                                'quantity': pos.get('longQuantity', 0) - pos.get('shortQuantity', 0),
+                                'average_price': pos.get('averagePrice', 0)
                             }
             return {'quantity': 0, 'average_price': 0}
         except Exception as e:
             print(f"Error fetching position for {symbol}: {e}")
             return {'quantity': 0, 'average_price': 0}
+    
+    def get_position(self, symbol):
+        """Get current position for a symbol (synchronous wrapper)."""
+        if self.paper_trading:
+            # In paper trading, track positions in memory
+            # TODO: Implement proper position tracking in paper trading mode
+            return {'quantity': 0, 'average_price': 0}
+        
+        if not self.client:
+            return {'quantity': 0, 'average_price': 0}
+        
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                print("Warning: Cannot run async method in existing event loop")
+                return {'quantity': 0, 'average_price': 0}
+            else:
+                return loop.run_until_complete(self._get_position_async(symbol))
+        except RuntimeError:
+            return asyncio.run(self._get_position_async(symbol))
+        except Exception as e:
+            print(f"Error fetching position for {symbol}: {e}")
+            return {'quantity': 0, 'average_price': 0}
+    
+    async def _place_order_async(self, symbol, quantity, side, order_type='MARKET', price=None):
+        """Async helper to place order via Schwab API."""
+        if not self.client or not self.account_id:
+            return None
+        
+        try:
+            from schwab.orders import equity_buy_market, equity_sell_market, equity_buy_limit, equity_sell_limit
+            
+            # Build order based on type and side
+            if order_type == 'MARKET':
+                if side == 'BUY':
+                    order = equity_buy_market(symbol, quantity)
+                else:  # SELL
+                    order = equity_sell_market(symbol, quantity)
+            elif order_type == 'LIMIT' and price:
+                if side == 'BUY':
+                    order = equity_buy_limit(symbol, quantity, price)
+                else:  # SELL
+                    order = equity_sell_limit(symbol, quantity, price)
+            else:
+                print(f"Error: Unsupported order type: {order_type}")
+                return None
+            
+            # Place order
+            response = await self.client.place_order(self.account_id, order)
+            return response.json() if hasattr(response, 'json') else response
+            
+        except Exception as e:
+            print(f"Error placing order: {e}")
+            return None
     
     def place_order(self, symbol, quantity, side, order_type='MARKET', price=None):
         """
@@ -174,8 +459,8 @@ class TradingAPI:
             self.trade_history.append(order)
             return order
         
-        if not self.session:
-            print("Error: Not connected to TD Ameritrade API")
+        if not self.client:
+            print("Error: Not connected to Schwab API")
             return None
         
         try:
@@ -183,35 +468,16 @@ class TradingAPI:
                 print("Error: Account ID not set")
                 return None
             
-            # Build order payload
-            order_payload = {
-                "orderType": order_type,
-                "session": "NORMAL",
-                "duration": "DAY",
-                "orderStrategyType": "SINGLE",
-                "orderLegCollection": [
-                    {
-                        "instruction": side,
-                        "quantity": quantity,
-                        "instrument": {
-                            "symbol": symbol,
-                            "assetType": "EQUITY"
-                        }
-                    }
-                ]
-            }
-            
-            if order_type == 'LIMIT' and price:
-                order_payload["price"] = price
-            
-            # Place order
-            response = self.session.place_order(
-                account=self.account_id,
-                order=order_payload
-            )
-            
-            return response
-            
+            # Run async method
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                print("Warning: Cannot run async method in existing event loop")
+                print("Consider using async methods directly")
+                return None
+            else:
+                return loop.run_until_complete(self._place_order_async(symbol, quantity, side, order_type, price))
+        except RuntimeError:
+            return asyncio.run(self._place_order_async(symbol, quantity, side, order_type, price))
         except Exception as e:
             print(f"Error placing order: {e}")
             return None
@@ -240,53 +506,120 @@ class TradingAPI:
         try:
             if signal == 'Buy AAPL, Sell MSFT':
                 # Buy AAPL, Sell MSFT
-                # For simplicity, we'll use equal dollar amounts
                 print(f"Executing: Buy AAPL, Sell MSFT")
                 print(f"Using ${position_value:.2f} per position")
-                
+
+                # FIXED: Get current prices instead of using hardcoded values
+                aapl_price = self.get_current_price('AAPL')
+                msft_price = self.get_current_price('MSFT')
+
+                if not aapl_price or not msft_price:
+                    print("Error: Could not fetch current prices. Aborting trade.")
+                    return orders
+
+                # Sanity check: prices should be reasonable
+                if aapl_price < 50 or aapl_price > 500:
+                    print(f"Warning: AAPL price ${aapl_price:.2f} seems unusual. Aborting trade.")
+                    return orders
+                if msft_price < 100 or msft_price > 1000:
+                    print(f"Warning: MSFT price ${msft_price:.2f} seems unusual. Aborting trade.")
+                    return orders
+
+                # Calculate quantities based on ACTUAL current prices
+                aapl_qty = int(position_value / aapl_price)
+                msft_qty = int(position_value / msft_price)
+
+                print(f"Current prices: AAPL=${aapl_price:.2f}, MSFT=${msft_price:.2f}")
+                print(f"Order quantities: AAPL={aapl_qty} shares, MSFT={msft_qty} shares")
+
                 # Place buy order for AAPL
-                order1 = self.place_order('AAPL', int(position_value / 150), 'BUY', 'MARKET')
+                order1 = self.place_order('AAPL', aapl_qty, 'BUY', 'MARKET')
                 if order1:
                     orders.append(order1)
-                    print(f"✓ Buy order placed for AAPL")
-                
+                    print(f"✓ Buy order placed for AAPL: {aapl_qty} shares @ ${aapl_price:.2f}")
+
                 # Place sell order for MSFT
-                order2 = self.place_order('MSFT', int(position_value / 300), 'SELL', 'MARKET')
+                order2 = self.place_order('MSFT', msft_qty, 'SELL', 'MARKET')
                 if order2:
                     orders.append(order2)
-                    print(f"✓ Sell order placed for MSFT")
-                    
+                    print(f"✓ Sell order placed for MSFT: {msft_qty} shares @ ${msft_price:.2f}")
+
             elif signal == 'Buy MSFT, Sell AAPL':
                 # Buy MSFT, Sell AAPL
                 print(f"Executing: Buy MSFT, Sell AAPL")
                 print(f"Using ${position_value:.2f} per position")
-                
+
+                # FIXED: Get current prices instead of using hardcoded values
+                aapl_price = self.get_current_price('AAPL')
+                msft_price = self.get_current_price('MSFT')
+
+                if not aapl_price or not msft_price:
+                    print("Error: Could not fetch current prices. Aborting trade.")
+                    return orders
+
+                # Sanity check: prices should be reasonable
+                if aapl_price < 50 or aapl_price > 500:
+                    print(f"Warning: AAPL price ${aapl_price:.2f} seems unusual. Aborting trade.")
+                    return orders
+                if msft_price < 100 or msft_price > 1000:
+                    print(f"Warning: MSFT price ${msft_price:.2f} seems unusual. Aborting trade.")
+                    return orders
+
+                # Calculate quantities based on ACTUAL current prices
+                aapl_qty = int(position_value / aapl_price)
+                msft_qty = int(position_value / msft_price)
+
+                print(f"Current prices: AAPL=${aapl_price:.2f}, MSFT=${msft_price:.2f}")
+                print(f"Order quantities: AAPL={aapl_qty} shares, MSFT={msft_qty} shares")
+
                 # Place buy order for MSFT
-                order1 = self.place_order('MSFT', int(position_value / 300), 'BUY', 'MARKET')
+                order1 = self.place_order('MSFT', msft_qty, 'BUY', 'MARKET')
                 if order1:
                     orders.append(order1)
-                    print(f"✓ Buy order placed for MSFT")
-                
+                    print(f"✓ Buy order placed for MSFT: {msft_qty} shares @ ${msft_price:.2f}")
+
                 # Place sell order for AAPL
-                order2 = self.place_order('AAPL', int(position_value / 150), 'SELL', 'MARKET')
+                order2 = self.place_order('AAPL', aapl_qty, 'SELL', 'MARKET')
                 if order2:
                     orders.append(order2)
-                    print(f"✓ Sell order placed for AAPL")
+                    print(f"✓ Sell order placed for AAPL: {aapl_qty} shares @ ${aapl_price:.2f}")
         
         except Exception as e:
             print(f"Error executing trade: {e}")
         
         return orders
     
+    async def _get_trade_history_async(self):
+        """Async helper to get trade history from Schwab API."""
+        if not self.client or not self.account_id:
+            return []
+        
+        try:
+            # Get orders for the account
+            orders_response = await self.client.get_orders_by_path(self.account_id)
+            orders = orders_response.json() if hasattr(orders_response, 'json') else orders_response
+            return orders if isinstance(orders, list) else []
+        except Exception as e:
+            print(f"Error fetching trade history: {e}")
+            return []
+    
     def get_trade_history(self):
-        """Get trade history."""
+        """Get trade history (synchronous wrapper)."""
         if self.paper_trading:
             return self.trade_history
         else:
-            # Fetch from TD Ameritrade API
+            if not self.client:
+                return []
+            
             try:
-                orders = self.session.get_orders(self.account_id)
-                return orders
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    print("Warning: Cannot run async method in existing event loop")
+                    return []
+                else:
+                    return loop.run_until_complete(self._get_trade_history_async())
+            except RuntimeError:
+                return asyncio.run(self._get_trade_history_async())
             except Exception as e:
                 print(f"Error fetching trade history: {e}")
                 return []

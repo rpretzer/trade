@@ -4,6 +4,10 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 import pickle
+from datetime import datetime, time
+from transaction_costs import TransactionCostModel
+from trading_execution import OrderExecutor, MarketImpact, BorrowCosts, MarginConfig
+from exceptions import OrderRejectedError, InsufficientFundsError, ShortNotAvailableError
 
 def load_processed_data(csv_file='processed_stock_data.csv'):
     """
@@ -63,8 +67,9 @@ def load_model_and_data(model_path='lstm_price_difference_model.h5',
     print(f"Loading data from {data_file}...")
     df, original_data = load_processed_data(data_file)
     
-    # Use normalized features (matching training data)
-    feature_columns = [
+    # Use the same feature selection logic as train_model.py
+    # Try normalized features first
+    feature_columns_normalized = [
         'AAPL_normalized', 'MSFT_normalized', 'Price_Difference_normalized',
         'AAPL_Volume_normalized', 'MSFT_Volume_normalized',
         'AAPL_MA5_normalized', 'MSFT_MA5_normalized',
@@ -77,25 +82,57 @@ def load_model_and_data(model_path='lstm_price_difference_model.h5',
         'AAPL_Reddit_Sentiment_normalized', 'MSFT_Reddit_Sentiment_normalized',
         'AAPL_Options_Volume_normalized', 'MSFT_Options_Volume_normalized'
     ]
-    if not all(col in df.columns for col in feature_columns):
-        # Fallback to original columns if normalized don't exist
-        feature_columns = [
-            'AAPL', 'MSFT', 'Price_Difference',
-            'AAPL_Volume', 'MSFT_Volume',
-            'AAPL_MA5', 'MSFT_MA5',
-            'AAPL_MA20', 'MSFT_MA20',
-            'AAPL_Volume_MA5', 'MSFT_Volume_MA5',
-            'AAPL_RSI', 'MSFT_RSI',
-            'AAPL_MACD', 'MSFT_MACD',
-            'AAPL_MACD_Signal', 'MSFT_MACD_Signal',
-            'AAPL_MACD_Histogram', 'MSFT_MACD_Histogram',
-            'AAPL_Reddit_Sentiment', 'MSFT_Reddit_Sentiment',
-            'AAPL_Options_Volume', 'MSFT_Options_Volume'
-        ]
+    
+    feature_columns_original = [
+        'AAPL', 'MSFT', 'Price_Difference',
+        'AAPL_Volume', 'MSFT_Volume',
+        'AAPL_MA5', 'MSFT_MA5',
+        'AAPL_MA20', 'MSFT_MA20',
+        'AAPL_Volume_MA5', 'MSFT_Volume_MA5',
+        'AAPL_RSI', 'MSFT_RSI',
+        'AAPL_MACD', 'MSFT_MACD',
+        'AAPL_MACD_Signal', 'MSFT_MACD_Signal',
+        'AAPL_MACD_Histogram', 'MSFT_MACD_Histogram',
+        'AAPL_Reddit_Sentiment', 'MSFT_Reddit_Sentiment',
+        'AAPL_Options_Volume', 'MSFT_Options_Volume'
+    ]
+    
+    # Check what features are actually available
+    available_normalized = [col for col in feature_columns_normalized if col in df.columns]
+    available_original = [col for col in feature_columns_original if col in df.columns]
+    
+    # Use normalized if more are available, otherwise use original
+    if len(available_normalized) > len(available_original) and len(available_normalized) > 0:
+        feature_columns = available_normalized
+        print(f"Using normalized features ({len(feature_columns)} features)")
+        data = df[feature_columns].values
+        scaler = None  # Data already normalized
+    elif len(available_original) > 0:
+        feature_columns = available_original
+        print(f"Using original features and scaling ({len(feature_columns)} features)")
         scaler = StandardScaler()
         data = scaler.fit_transform(df[feature_columns])
     else:
-        data = df[feature_columns].values
+        # Fallback to basic features if new ones aren't available
+        print("Warning: Advanced features not found. Using basic features only.")
+        basic_features = [
+            'AAPL_normalized', 'MSFT_normalized', 'Price_Difference_normalized',
+            'AAPL_Volume_normalized', 'MSFT_Volume_normalized',
+            'AAPL_MA5_normalized', 'MSFT_MA5_normalized',
+            'AAPL_MA20_normalized', 'MSFT_MA20_normalized',
+            'AAPL_Volume_MA5_normalized', 'MSFT_Volume_MA5_normalized'
+        ]
+        feature_columns = [col for col in basic_features if col in df.columns]
+        if not feature_columns:
+            feature_columns = ['AAPL', 'MSFT', 'Price_Difference', 'AAPL_Volume', 'MSFT_Volume']
+            scaler = StandardScaler()
+            data = scaler.fit_transform(df[feature_columns])
+        else:
+            data = df[feature_columns].values
+            scaler = None
+    
+    print(f"Features included: {len(feature_columns)}")
+    print(f"Feature list: {feature_columns[:10]}...")  # Show first 10 features
     
     # Create sequences
     X, y = create_sequences(data, timesteps)
@@ -237,11 +274,39 @@ def backtest_strategy(predictions, actual_differences, price_data, threshold=0.5
     print(f"Risk Management:")
     print(f"  Max Drawdown: {max_drawdown*100:.1f}%")
     print(f"  Stop-Loss per trade: {stop_loss_pct*100:.1f}%")
-    
+
+    # Initialize transaction cost model
+    cost_model = TransactionCostModel(
+        commission_per_share=0.005,
+        sec_fee_rate=0.0000278,
+        slippage_bps=1.0,
+        short_borrow_rate_annual=0.01
+    )
+    print(f"  Transaction costs: Commission $0.005/share, Slippage 1bp, SEC fees")
+
+    # Initialize order executor for realistic execution
+    borrow_costs = BorrowCosts(
+        easy_to_borrow_rate=0.01,
+        moderate_borrow_rate=0.05,
+        hard_to_borrow_rate=0.15
+    )
+    margin_config = MarginConfig(
+        margin_interest_rate=0.08,
+        maintenance_margin=0.25,
+        initial_margin=0.50
+    )
+    order_executor = OrderExecutor(
+        borrow_costs=borrow_costs,
+        margin_config=margin_config,
+        allow_after_hours=False  # Enforce market hours
+    )
+    print(f"  Order execution: Market hours, shortable checks, partial fills enabled")
+
     capital = initial_capital
     positions = []  # Track all positions
     trades = []  # Track whether trades were executed
     equity_curve = [capital]
+    total_transaction_costs = 0.0  # Track cumulative costs
     
     # Track active positions for stop-loss
     active_positions = []  # List of dicts: {'symbol': 'AAPL', 'entry_price': 150, 'quantity': 10, 'is_long': True}
@@ -282,8 +347,8 @@ def backtest_strategy(predictions, actual_differences, price_data, threshold=0.5
                     loss = (entry_price - current_price) * pos['quantity']
                 else:
                     loss = (current_price - entry_price) * pos['quantity']
-                
-                capital += loss  # Loss reduces capital
+
+                capital -= abs(loss)  # FIXED: Subtract loss from capital
                 active_positions.remove(pos)
                 
                 print(f"  Stop-loss triggered for {symbol} at ${current_price:.2f} (entry: ${entry_price:.2f})")
@@ -309,66 +374,228 @@ def backtest_strategy(predictions, actual_differences, price_data, threshold=0.5
         if signal != 'Hold' and prev_diff is not None and not trading_paused:
             # Execute trade (only if not paused)
             position_size = capital * 0.1  # Use 10% of capital per trade
-            
+
             if signal == 'Buy AAPL, Sell MSFT':
                 # Betting difference will increase
                 # Enter: long AAPL, short MSFT
                 diff_change = actual_diff - prev_diff
-                
-                # Calculate profit with stop-loss consideration
-                profit = position_size * (diff_change / (aapl_price + msft_price))
-                
-                # Apply stop-loss
-                aapl_entry = aapl_price
-                msft_entry = msft_price
-                stop_loss_triggered_aapl = apply_stop_loss(aapl_price, aapl_entry, stop_loss_pct, is_long=True)
-                stop_loss_triggered_msft = apply_stop_loss(msft_price, msft_entry, stop_loss_pct, is_long=False)
-                
-                if stop_loss_triggered_aapl or stop_loss_triggered_msft:
-                    # Stop-loss triggered - calculate loss
-                    profit = -position_size * stop_loss_pct
-                    trade_result['stop_loss_triggered'] = True
-                    print(f"  Stop-loss triggered for {signal} at day {i}")
-                else:
+
+                # Calculate quantity for each leg
+                aapl_qty = int(position_size / aapl_price)
+                msft_qty = int(position_size / msft_price)
+
+                # Get current timestamp (use index date + 10 AM)
+                trade_time = datetime.combine(price_data.index[i].date(), time(10, 0))
+
+                trade_executed = False
+                trade_costs = 0.0
+                profit = 0.0
+
+                try:
+                    # Execute buy AAPL order
+                    aapl_result = order_executor.execute_order(
+                        symbol='AAPL',
+                        quantity=aapl_qty,
+                        side='BUY',
+                        price=aapl_price,
+                        order_type='MARKET',
+                        available_balance=capital,
+                        timestamp=trade_time,
+                        average_daily_volume=1000000,  # Mock ADV
+                        spread=0.01,  # Mock 1 cent spread
+                        is_shortable=True  # AAPL typically shortable
+                    )
+
+                    # Execute sell MSFT order (short)
+                    msft_result = order_executor.execute_order(
+                        symbol='MSFT',
+                        quantity=msft_qty,
+                        side='SELL',
+                        price=msft_price,
+                        order_type='MARKET',
+                        available_balance=capital,
+                        timestamp=trade_time,
+                        average_daily_volume=1000000,  # Mock ADV
+                        spread=0.01,  # Mock 1 cent spread
+                        is_shortable=True  # MSFT typically shortable
+                    )
+
+                    # Both orders executed successfully
+                    if aapl_result['status'] == 'FILLED' and msft_result['status'] == 'FILLED':
+                        trade_executed = True
+
+                        # Get actual filled quantities and prices
+                        aapl_filled_qty = aapl_result['filled_quantity']
+                        msft_filled_qty = msft_result['filled_quantity']
+                        aapl_avg_price = aapl_result['average_price']
+                        msft_avg_price = msft_result['average_price']
+
+                        # Calculate costs from execution results
+                        trade_costs = aapl_result['total_cost'] + msft_result['total_cost']
+                        total_transaction_costs += trade_costs
+
+                        # Calculate profit with actual filled quantities
+                        gross_profit = position_size * (diff_change / (aapl_avg_price + msft_avg_price))
+                        profit = gross_profit - trade_costs
+
+                        # Track positions
+                        if aapl_filled_qty > 0:
+                            active_positions.append({
+                                'symbol': 'AAPL',
+                                'entry_price': aapl_avg_price,
+                                'quantity': aapl_filled_qty,
+                                'is_long': True
+                            })
+                        if msft_filled_qty > 0:
+                            active_positions.append({
+                                'symbol': 'MSFT',
+                                'entry_price': msft_avg_price,
+                                'quantity': msft_filled_qty,
+                                'is_long': False
+                            })
+                    elif aapl_result['status'] == 'PARTIAL' or msft_result['status'] == 'PARTIAL':
+                        # Handle partial fills
+                        trade_executed = True
+                        trade_costs = aapl_result.get('total_cost', 0) + msft_result.get('total_cost', 0)
+                        total_transaction_costs += trade_costs
+
+                        # Reduced profit due to partial fill
+                        fill_rate = (aapl_result['filled_quantity'] + msft_result['filled_quantity']) / (aapl_qty + msft_qty)
+                        gross_profit = position_size * fill_rate * (diff_change / (aapl_price + msft_price))
+                        profit = gross_profit - trade_costs
+
+                        print(f"  Partial fill: AAPL {aapl_result['filled_quantity']}/{aapl_qty}, "
+                              f"MSFT {msft_result['filled_quantity']}/{msft_qty}")
+
+                except (OrderRejectedError, InsufficientFundsError, ShortNotAvailableError) as e:
+                    # Order rejected - no trade executed
+                    print(f"  Order rejected for {signal}: {e}")
+                    trade_executed = False
+                    profit = 0.0
+                except Exception as e:
+                    # Unexpected error - log and skip trade
+                    print(f"  Trade execution error for {signal}: {e}")
+                    trade_executed = False
+                    profit = 0.0
+
+                if trade_executed:
                     capital += profit
-                    # Track positions
-                    quantity = int(position_size / aapl_price)
-                    if quantity > 0:
-                        active_positions.append({'symbol': 'AAPL', 'entry_price': aapl_entry, 'quantity': quantity, 'is_long': True})
-                        active_positions.append({'symbol': 'MSFT', 'entry_price': msft_entry, 'quantity': quantity, 'is_long': False})
-                
-                trade_result['profit'] = profit
-                trade_result['return_pct'] = (diff_change / (aapl_price + msft_price)) * 100
-                trades.append(True)
+                    trade_result['profit'] = profit
+                    trade_result['return_pct'] = (diff_change / (aapl_price + msft_price)) * 100
+                    trades.append(True)
+                else:
+                    trades.append(False)
                 
             elif signal == 'Buy MSFT, Sell AAPL':
                 # Betting difference will decrease
                 # Enter: long MSFT, short AAPL
                 diff_change = prev_diff - actual_diff
-                profit = position_size * (diff_change / (aapl_price + msft_price))
-                
-                # Apply stop-loss
-                aapl_entry = aapl_price
-                msft_entry = msft_price
-                stop_loss_triggered_aapl = apply_stop_loss(aapl_price, aapl_entry, stop_loss_pct, is_long=False)
-                stop_loss_triggered_msft = apply_stop_loss(msft_price, msft_entry, stop_loss_pct, is_long=True)
-                
-                if stop_loss_triggered_aapl or stop_loss_triggered_msft:
-                    # Stop-loss triggered
-                    profit = -position_size * stop_loss_pct
-                    trade_result['stop_loss_triggered'] = True
-                    print(f"  Stop-loss triggered for {signal} at day {i}")
-                else:
+
+                # Calculate quantity for each leg
+                aapl_qty = int(position_size / aapl_price)
+                msft_qty = int(position_size / msft_price)
+
+                # Get current timestamp (use index date + 10 AM)
+                trade_time = datetime.combine(price_data.index[i].date(), time(10, 0))
+
+                trade_executed = False
+                trade_costs = 0.0
+                profit = 0.0
+
+                try:
+                    # Execute buy MSFT order
+                    msft_result = order_executor.execute_order(
+                        symbol='MSFT',
+                        quantity=msft_qty,
+                        side='BUY',
+                        price=msft_price,
+                        order_type='MARKET',
+                        available_balance=capital,
+                        timestamp=trade_time,
+                        average_daily_volume=1000000,  # Mock ADV
+                        spread=0.01,  # Mock 1 cent spread
+                        is_shortable=True  # MSFT typically shortable
+                    )
+
+                    # Execute sell AAPL order (short)
+                    aapl_result = order_executor.execute_order(
+                        symbol='AAPL',
+                        quantity=aapl_qty,
+                        side='SELL',
+                        price=aapl_price,
+                        order_type='MARKET',
+                        available_balance=capital,
+                        timestamp=trade_time,
+                        average_daily_volume=1000000,  # Mock ADV
+                        spread=0.01,  # Mock 1 cent spread
+                        is_shortable=True  # AAPL typically shortable
+                    )
+
+                    # Both orders executed successfully
+                    if msft_result['status'] == 'FILLED' and aapl_result['status'] == 'FILLED':
+                        trade_executed = True
+
+                        # Get actual filled quantities and prices
+                        msft_filled_qty = msft_result['filled_quantity']
+                        aapl_filled_qty = aapl_result['filled_quantity']
+                        msft_avg_price = msft_result['average_price']
+                        aapl_avg_price = aapl_result['average_price']
+
+                        # Calculate costs from execution results
+                        trade_costs = msft_result['total_cost'] + aapl_result['total_cost']
+                        total_transaction_costs += trade_costs
+
+                        # Calculate profit with actual filled quantities
+                        gross_profit = position_size * (diff_change / (msft_avg_price + aapl_avg_price))
+                        profit = gross_profit - trade_costs
+
+                        # Track positions
+                        if msft_filled_qty > 0:
+                            active_positions.append({
+                                'symbol': 'MSFT',
+                                'entry_price': msft_avg_price,
+                                'quantity': msft_filled_qty,
+                                'is_long': True
+                            })
+                        if aapl_filled_qty > 0:
+                            active_positions.append({
+                                'symbol': 'AAPL',
+                                'entry_price': aapl_avg_price,
+                                'quantity': aapl_filled_qty,
+                                'is_long': False
+                            })
+                    elif msft_result['status'] == 'PARTIAL' or aapl_result['status'] == 'PARTIAL':
+                        # Handle partial fills
+                        trade_executed = True
+                        trade_costs = msft_result.get('total_cost', 0) + aapl_result.get('total_cost', 0)
+                        total_transaction_costs += trade_costs
+
+                        # Reduced profit due to partial fill
+                        fill_rate = (msft_result['filled_quantity'] + aapl_result['filled_quantity']) / (msft_qty + aapl_qty)
+                        gross_profit = position_size * fill_rate * (diff_change / (msft_price + aapl_price))
+                        profit = gross_profit - trade_costs
+
+                        print(f"  Partial fill: MSFT {msft_result['filled_quantity']}/{msft_qty}, "
+                              f"AAPL {aapl_result['filled_quantity']}/{aapl_qty}")
+
+                except (OrderRejectedError, InsufficientFundsError, ShortNotAvailableError) as e:
+                    # Order rejected - no trade executed
+                    print(f"  Order rejected for {signal}: {e}")
+                    trade_executed = False
+                    profit = 0.0
+                except Exception as e:
+                    # Unexpected error - log and skip trade
+                    print(f"  Trade execution error for {signal}: {e}")
+                    trade_executed = False
+                    profit = 0.0
+
+                if trade_executed:
                     capital += profit
-                    # Track positions
-                    quantity = int(position_size / msft_price)
-                    if quantity > 0:
-                        active_positions.append({'symbol': 'MSFT', 'entry_price': msft_entry, 'quantity': quantity, 'is_long': True})
-                        active_positions.append({'symbol': 'AAPL', 'entry_price': aapl_entry, 'quantity': quantity, 'is_long': False})
-                
-                trade_result['profit'] = profit
-                trade_result['return_pct'] = (diff_change / (aapl_price + msft_price)) * 100
-                trades.append(True)
+                    trade_result['profit'] = profit
+                    trade_result['return_pct'] = (diff_change / (msft_price + aapl_price)) * 100
+                    trades.append(True)
+                else:
+                    trades.append(False)
         else:
             if trading_paused:
                 trades.append(False)  # No trade due to pause
@@ -398,24 +625,30 @@ def backtest_strategy(predictions, actual_differences, price_data, threshold=0.5
     drawdown = (equity_array - running_max) / running_max * 100
     max_drawdown_actual = np.min(drawdown)
     
+    # Calculate net profit (after all costs)
+    net_profit = total_profit  # Already includes transaction costs in our calculation
+
     results = {
         'initial_capital': initial_capital,
         'final_capital': capital,
         'total_return_pct': total_return,
         'total_profit': total_profit,
+        'total_transaction_costs': total_transaction_costs,
+        'net_profit': net_profit,
         'num_trades': num_trades,
         'winning_trades': winning_trades,
         'losing_trades': losing_trades,
         'stop_loss_trades': stop_loss_trades,
         'win_rate': win_rate,
         'avg_profit_per_trade': avg_profit,
+        'avg_cost_per_trade': total_transaction_costs / num_trades if num_trades > 0 else 0,
         'max_drawdown_pct': max_drawdown_actual,
         'drawdown_limit_reached': drawdown_reached,
         'positions': positions,
         'equity_curve': equity_curve,
         'signals': signals
     }
-    
+
     return results
 
 def print_backtest_results(results):
@@ -427,6 +660,12 @@ def print_backtest_results(results):
     print(f"Final Capital:        ${results['final_capital']:,.2f}")
     print(f"Total Return:         {results['total_return_pct']:.2f}%")
     print(f"Total Profit/Loss:    ${results['total_profit']:,.2f}")
+    print(f"\nTransaction Costs:")
+    print(f"  Total Costs:        ${results.get('total_transaction_costs', 0):,.2f}")
+    print(f"  Avg Cost/Trade:     ${results.get('avg_cost_per_trade', 0):,.2f}")
+    if results.get('total_profit', 0) != 0:
+        cost_pct = (results.get('total_transaction_costs', 0) / abs(results['total_profit'])) * 100
+        print(f"  Costs as % of P&L:  {cost_pct:.2f}%")
     print(f"\nTrading Statistics:")
     print(f"  Total Trades:       {results['num_trades']}")
     print(f"  Winning Trades:     {results['winning_trades']}")

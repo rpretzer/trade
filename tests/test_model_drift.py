@@ -5,7 +5,7 @@ Tests performance monitoring, feature drift, and prediction drift detection
 
 import pytest
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from model_drift_detection import (
     PerformanceMonitor, FeatureDriftDetector, PredictionDriftDetector,
     ModelDriftMonitor, DriftSeverity, DriftType, DriftAlert, PerformanceMetrics
@@ -417,7 +417,7 @@ class TestPerformanceMetrics:
     def test_metrics_creation(self):
         """Test creating performance metrics."""
         metrics = PerformanceMetrics(
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             mse=0.15,
             mae=0.30,
             directional_accuracy=62.5,

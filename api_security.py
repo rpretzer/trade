@@ -8,7 +8,7 @@ import hashlib
 import json
 import logging
 from typing import Dict, Optional, Tuple
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from exceptions import SecurityException
 
@@ -111,7 +111,7 @@ class RequestSigner:
             params = {}
 
         # Generate timestamp and nonce
-        timestamp = datetime.utcnow().isoformat() + 'Z'
+        timestamp = datetime.now(timezone.utc).isoformat() + 'Z'
         nonce = self._generate_nonce()
 
         # Create signature
@@ -139,7 +139,7 @@ class RequestSigner:
         # Check timestamp freshness
         try:
             request_time = datetime.fromisoformat(signed_request.timestamp.replace('Z', ''))
-            age = (datetime.utcnow() - request_time).total_seconds()
+            age = (datetime.now(timezone.utc) - request_time).total_seconds()
 
             if age > self.max_timestamp_age:
                 return False, f"Request too old: {age:.0f}s > {self.max_timestamp_age}s"
@@ -272,7 +272,7 @@ class ResponseVerifier:
         """
         # Create canonical representation
         data_str = json.dumps(response_data, sort_keys=True, separators=(',', ':'))
-        timestamp = datetime.utcnow().isoformat() + 'Z'
+        timestamp = datetime.now(timezone.utc).isoformat() + 'Z'
 
         # Create signature
         message = f"{data_str}|{request_nonce}|{timestamp}"

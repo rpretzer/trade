@@ -6,7 +6,7 @@ Immutable, tamper-proof logging of all critical operations
 import json
 import hashlib
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Optional, Any
 from pathlib import Path
 from dataclasses import dataclass, asdict
@@ -177,7 +177,7 @@ class AuditLogger:
         """
         # Create event
         event = AuditEvent(
-            timestamp=datetime.utcnow().isoformat() + 'Z',
+            timestamp=datetime.now(timezone.utc).isoformat() + 'Z',
             event_type=event_type,
             user=user,
             action=action,

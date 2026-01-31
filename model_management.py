@@ -9,7 +9,7 @@ import hashlib
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass, asdict
 from enum import Enum
@@ -323,7 +323,7 @@ class ModelRegistry:
         self.models[version].status = status
 
         if status == ModelStatus.PRODUCTION:
-            self.models[version].deployed_at = datetime.utcnow().isoformat()
+            self.models[version].deployed_at = datetime.now(timezone.utc).isoformat()
 
         self._save_registry()
 

@@ -7,7 +7,7 @@ import logging
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional, Tuple
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from enum import Enum
 from collections import deque
@@ -120,7 +120,7 @@ class PerformanceMonitor:
             timestamp: Prediction timestamp
         """
         if timestamp is None:
-            timestamp = datetime.utcnow()
+            timestamp = datetime.now(timezone.utc)
 
         error = abs(predicted - actual)
         self.recent_errors.append(error)
@@ -143,7 +143,7 @@ class PerformanceMonitor:
         errors = np.array(self.recent_errors)
 
         return PerformanceMetrics(
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             mse=np.mean(errors ** 2),
             mae=np.mean(errors),
             directional_accuracy=np.mean(self.recent_directions) * 100,
@@ -314,7 +314,7 @@ class FeatureDriftDetector:
                     severity = self._calculate_severity_from_pvalue(p_value)
 
                     alerts.append(DriftAlert(
-                        timestamp=datetime.utcnow(),
+                        timestamp=datetime.now(timezone.utc),
                         drift_type=DriftType.FEATURE,
                         severity=severity,
                         metric_name=f"{feature}_mean",
@@ -332,7 +332,7 @@ class FeatureDriftDetector:
                 # Significant if variance changed by > 50%
                 if variance_ratio > 1.5 or variance_ratio < 0.67:
                     alerts.append(DriftAlert(
-                        timestamp=datetime.utcnow(),
+                        timestamp=datetime.now(timezone.utc),
                         drift_type=DriftType.FEATURE,
                         severity=DriftSeverity.MEDIUM,
                         metric_name=f"{feature}_std",
@@ -410,7 +410,7 @@ class PredictionDriftDetector:
 
             if z_score > 3:  # 3 sigma event
                 alerts.append(DriftAlert(
-                    timestamp=datetime.utcnow(),
+                    timestamp=datetime.now(timezone.utc),
                     drift_type=DriftType.PREDICTION,
                     severity=DriftSeverity.HIGH,
                     metric_name='prediction_mean',
@@ -511,7 +511,7 @@ class ModelDriftMonitor:
         """
         recent_alerts = [
             a for a in self.alert_history
-            if (datetime.utcnow() - a.timestamp).days < 7
+            if (datetime.now(timezone.utc) - a.timestamp).days < 7
         ]
 
         severity_counts = {}

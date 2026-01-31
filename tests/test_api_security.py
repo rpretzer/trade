@@ -5,7 +5,7 @@ Tests request signing, verification, and replay attack prevention
 
 import pytest
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from api_security import (
     RequestSigner, ResponseVerifier, SignedRequest,
     SignatureVerificationError, ReplayAttackError,
@@ -108,7 +108,7 @@ class TestRequestSigner:
         signed = self.signer.sign_request('GET', '/api/test')
 
         # Manually age the timestamp
-        old_time = datetime.utcnow() - timedelta(seconds=400)
+        old_time = datetime.now(timezone.utc) - timedelta(seconds=400)
         signed.timestamp = old_time.isoformat() + 'Z'
 
         # Need to re-sign with old timestamp
@@ -126,7 +126,7 @@ class TestRequestSigner:
         signed = self.signer.sign_request('GET', '/api/test')
 
         # Set timestamp in future
-        future_time = datetime.utcnow() + timedelta(seconds=120)
+        future_time = datetime.now(timezone.utc) + timedelta(seconds=120)
         signed.timestamp = future_time.isoformat() + 'Z'
         signed.signature = self.signer._create_signature(
             signed.method, signed.endpoint, signed.params,
@@ -166,7 +166,7 @@ class TestRequestSigner:
         params1 = {'a': '1', 'b': '2', 'c': '3'}
         params2 = {'c': '3', 'a': '1', 'b': '2'}
 
-        timestamp = datetime.utcnow().isoformat() + 'Z'
+        timestamp = datetime.now(timezone.utc).isoformat() + 'Z'
         nonce = self.signer._generate_nonce()
 
         sig1 = self.signer._create_signature('GET', '/test', params1, timestamp, nonce)

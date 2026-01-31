@@ -1,0 +1,31 @@
+[MASTER]
+ignore=CVS,.git,__pycache__,venv,venv_py312,.pytest_cache,database,logs
+jobs=4
+
+[MESSAGES CONTROL]
+disable=
+    C0103,  # Invalid name (too strict for ML/finance code)
+    C0114,  # Missing module docstring
+    C0115,  # Missing class docstring
+    C0116,  # Missing function docstring
+    R0913,  # Too many arguments (common in data science)
+    R0914,  # Too many local variables
+    W0212,  # Access to protected member (needed for testing)
+    W0511,  # TODOs
+    fixme,
+
+[FORMAT]
+max-line-length=120
+indent-string='    '
+
+[BASIC]
+good-names=i,j,k,x,y,z,df,X,y,f,e,lr,ax,id
+
+[DESIGN]
+max-args=10
+max-attributes=15
+max-locals=20
+min-public-methods=1
+
+[SIMILARITIES]
+min-similarity-lines=10

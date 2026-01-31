@@ -1,0 +1,30 @@
+# Development Dependencies
+# Install with: pip install -r requirements-dev.txt
+
+# First install production dependencies
+-r requirements.txt
+
+# Testing
+pytest==9.0.2
+pytest-asyncio==1.3.0
+pytest-cov==6.0.0  # Test coverage
+pytest-mock==3.14.0  # Mocking
+
+# Code Quality
+pylint==3.3.4
+black==25.1.0  # Code formatter
+isort==5.13.2  # Import sorting
+mypy==1.14.1  # Type checking
+flake8==7.2.1  # Linting
+
+# Documentation
+sphinx==8.4.0  # Documentation generator
+sphinx-rtd-theme==3.2.0  # ReadTheDocs theme
+
+# Development Tools
+ipython==9.2.0  # Enhanced Python shell
+ipdb==0.13.13  # Debugger
+
+# Security Scanning
+safety==3.3.2  # Dependency vulnerability scanner
+bandit==1.8.1  # Security linting

@@ -7,77 +7,133 @@ A fun and interactive command-line interface for the stock arbitrage trading sys
 import os
 import sys
 import subprocess
+import functools
+import traceback as _tb
 from datetime import datetime
 
-# Color codes for terminal output (ANSI escape codes)
+# ── Colour support (disabled via NO_COLOR env or --no-color flag) ──────
+_NO_COLOR = os.environ.get("NO_COLOR") is not None or "--no-color" in sys.argv
+
 class Colors:
-    HEADER = '\033[95m'
-    OKBLUE = '\033[94m'
-    OKCYAN = '\033[96m'
-    OKGREEN = '\033[92m'
-    WARNING = '\033[93m'
-    FAIL = '\033[91m'
-    ENDC = '\033[0m'
-    BOLD = '\033[1m'
-    UNDERLINE = '\033[4m'
+    """ANSI colour codes; all empty strings when colour is disabled."""
+    if _NO_COLOR:
+        HEADER = OKBLUE = OKCYAN = OKGREEN = WARNING = FAIL = ENDC = BOLD = UNDERLINE = ''
+    else:
+        HEADER    = '\033[95m'
+        OKBLUE    = '\033[94m'
+        OKCYAN    = '\033[96m'
+        OKGREEN   = '\033[92m'
+        WARNING   = '\033[93m'
+        FAIL      = '\033[91m'
+        ENDC      = '\033[0m'
+        BOLD      = '\033[1m'
+        UNDERLINE = '\033[4m'
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────
 
 def get_python_cmd():
-    """Get the Python command to use (prefers Python 3.12 venv if available for TensorFlow)."""
+    """Return the best Python executable (prefers 3.12 venv for TensorFlow)."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
     venv_python = os.path.join(script_dir, 'venv_py312', 'bin', 'python')
     if os.path.exists(venv_python):
         return venv_python
     return sys.executable
 
+
+def safe_execute(func):
+    """Decorator: catch exceptions inside a menu handler so the loop never dies."""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except KeyboardInterrupt:
+            print_warning("\n⚠  [CANCELLED] Operation interrupted by user")
+            return False
+        except Exception as exc:
+            print_error(f"[ERROR] {exc}")
+            show_tb = get_user_input("Show detailed traceback? (y/n)", "n")
+            if show_tb and show_tb.lower() == 'y':
+                _tb.print_exc()
+            return False
+    return wrapper
+
+
+# ── Output primitives ────────────────────────────────────────────────────
+
 def print_header():
-    """Print a fun header banner."""
+    """Print the top banner."""
     print(f"\n{Colors.HEADER}{Colors.BOLD}{'='*70}")
-    print("  🚀  STOCK ARBITRAGE MODEL - INTERACTIVE CLI  🚀")
+    print("  STOCK ARBITRAGE MODEL - INTERACTIVE CLI")
     print(f"{'='*70}{Colors.ENDC}")
-    print(f"{Colors.OKCYAN}💰 Predict price differences between AAPL and MSFT")
-    print(f"📈 Train LSTM models and backtest trading strategies{Colors.ENDC}\n")
+    print(f"{Colors.OKCYAN}  Predict price differences | Train LSTM | Backtest | Live trade{Colors.ENDC}\n")
 
 def print_success(message):
-    """Print a success message."""
-    print(f"{Colors.OKGREEN}✓ {message}{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}[SUCCESS] {message}{Colors.ENDC}")
 
 def print_error(message):
-    """Print an error message."""
-    print(f"{Colors.FAIL}✗ {message}{Colors.ENDC}")
+    print(f"{Colors.FAIL}[ERROR] {message}{Colors.ENDC}")
 
 def print_info(message):
-    """Print an info message."""
-    print(f"{Colors.OKBLUE}ℹ {message}{Colors.ENDC}")
+    print(f"{Colors.OKBLUE}[INFO] {message}{Colors.ENDC}")
 
 def print_warning(message):
-    """Print a warning message."""
-    print(f"{Colors.WARNING}⚠ {message}{Colors.ENDC}")
+    print(f"{Colors.WARNING}[WARNING] {message}{Colors.ENDC}")
 
 def clear_screen():
-    """Clear the terminal screen."""
     os.system('clear' if os.name != 'nt' else 'cls')
 
-def get_user_input(prompt, default=None, input_type=str):
-    """Get user input with a default value."""
-    if default is not None:
-        prompt_text = f"{Colors.BOLD}{prompt} [{default}]: {Colors.ENDC}"
-    else:
-        prompt_text = f"{Colors.BOLD}{prompt}: {Colors.ENDC}"
-    
-    try:
-        user_input = input(prompt_text).strip()
-        if not user_input and default is not None:
-            return default
-        if not user_input:
+
+# ── Input ────────────────────────────────────────────────────────────────
+
+def get_user_input(prompt, default=None, input_type=str, validator=None):
+    """
+    Prompt the user for input with an optional default, type conversion, and
+    a *validator* callback ``(value) -> (bool, str)`` that returns
+    ``(True, "")`` on success or ``(False, "error message")`` on failure.
+    Keeps re-prompting until the value is valid or the user presses Ctrl-C.
+    """
+    while True:
+        if default is not None:
+            prompt_text = f"{Colors.BOLD}{prompt} [{default}]: {Colors.ENDC}"
+        else:
+            prompt_text = f"{Colors.BOLD}{prompt}: {Colors.ENDC}"
+
+        try:
+            raw = input(prompt_text).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
             return None
-        return input_type(user_input)
-    except (ValueError, KeyboardInterrupt):
-        return None
+
+        # Apply default
+        if not raw:
+            if default is not None:
+                raw = str(default)
+            else:
+                print_warning("  A value is required.  Try again.")
+                continue
+
+        # Type conversion
+        try:
+            value = input_type(raw)
+        except (ValueError, TypeError):
+            print_warning(f"  Expected {input_type.__name__}.  Try again.")
+            continue
+
+        # Custom validation
+        if validator is not None:
+            ok, msg = validator(value)
+            if not ok:
+                print_warning(f"  {msg}")
+                continue
+
+        return value
+
 
 def check_file_exists(filename):
-    """Check if a file exists."""
     return os.path.exists(filename)
 
+@safe_execute
 def update_sentiment_cache_cli():
     """Update Reddit sentiment cache via CLI."""
     print(f"\n{Colors.HEADER}{Colors.BOLD}💬 UPDATE REDDIT SENTIMENT CACHE{Colors.ENDC}")
@@ -136,6 +192,7 @@ def update_sentiment_cache_cli():
         traceback.print_exc()
         return False
 
+@safe_execute
 def update_options_cache_cli():
     """Update options volume cache via CLI."""
     print(f"\n{Colors.HEADER}{Colors.BOLD}📊 UPDATE OPTIONS VOLUME CACHE{Colors.ENDC}")
@@ -195,6 +252,7 @@ def update_options_cache_cli():
         traceback.print_exc()
         return False
 
+@safe_execute
 def clear_yfinance_cache():
     """Clear the yfinance cache to fix download issues."""
     import shutil
@@ -223,6 +281,7 @@ def clear_yfinance_cache():
     print_success("Cache clearing complete!")
     return True
 
+@safe_execute
 def process_data():
     """Run the data processing script."""
     print(f"\n{Colors.HEADER}{Colors.BOLD}📥 PROCESSING STOCK DATA{Colors.ENDC}")
@@ -417,6 +476,7 @@ def process_data():
         print("  • Check your internet connection")
         return False
 
+@safe_execute
 def train_model():
     """Run the model training script."""
     print(f"\n{Colors.HEADER}{Colors.BOLD}🧠 TRAINING LSTM MODEL{Colors.ENDC}")
@@ -470,6 +530,7 @@ def train_model():
         print_error(f"Error: {e}")
         return False
 
+@safe_execute
 def backtest_strategy():
     """Run the backtesting script."""
     print(f"\n{Colors.HEADER}{Colors.BOLD}📊 BACKTESTING TRADING STRATEGY{Colors.ENDC}")
@@ -546,6 +607,7 @@ def backtest_strategy():
         print("  • Check that TensorFlow is installed")
         return False
 
+@safe_execute
 def setup_live_trading():
     """First-use setup process for Schwab API credentials."""
     print(f"\n{Colors.HEADER}{Colors.BOLD}⚙️  SETUP LIVE TRADING (SCHWAB API){Colors.ENDC}")
@@ -763,6 +825,7 @@ def setup_live_trading():
         traceback.print_exc()
         return False
 
+@safe_execute
 def live_trade():
     """Run live trading (paper trading mode)."""
     print(f"\n{Colors.HEADER}{Colors.BOLD}💰 LIVE TRADING{Colors.ENDC}")
@@ -929,6 +992,7 @@ except Exception as e:
         traceback.print_exc()
         return False
 
+@safe_execute
 def show_status():
     """Show the status of files in the project."""
     print(f"\n{Colors.HEADER}{Colors.BOLD}📋 PROJECT STATUS{Colors.ENDC}")
@@ -955,6 +1019,7 @@ def show_status():
     else:
         print(f"\n{Colors.WARNING}⚠ Some files are missing. Run the appropriate options to generate them.{Colors.ENDC}\n")
 
+@safe_execute
 def run_full_pipeline():
     """Run the complete pipeline: process data, train model, and backtest."""
     print(f"\n{Colors.HEADER}{Colors.BOLD}🚀 RUNNING FULL PIPELINE{Colors.ENDC}")
@@ -989,6 +1054,7 @@ def run_full_pipeline():
     print("  🎉  PIPELINE COMPLETED SUCCESSFULLY!  🎉")
     print(f"{'='*70}{Colors.ENDC}\n")
 
+@safe_execute
 def launch_dashboard():
     """Launch the Streamlit dashboard."""
     print(f"\n{Colors.HEADER}{Colors.BOLD}📊 LAUNCHING DASHBOARD{Colors.ENDC}")
@@ -1048,6 +1114,7 @@ def get_selected_stocks():
     # Default stocks
     return 'AAPL', 'MSFT'
 
+@safe_execute
 def select_stocks():
     """Allow user to select stock pairs for analysis with checkbox interface."""
     print(f"\n{Colors.HEADER}{Colors.BOLD}🔄 SELECT STOCKS FOR ANALYSIS{Colors.ENDC}")
@@ -1174,6 +1241,7 @@ def select_stocks():
             print_error("Invalid input! Please enter a number, 'c', or 'd'")
             print()
 
+@safe_execute
 def analyze_correlation():
     """Analyze correlations between stocks and suggest pairs."""
     print(f"\n{Colors.HEADER}{Colors.BOLD}📊 ANALYZE STOCK CORRELATIONS{Colors.ENDC}")
@@ -1252,6 +1320,7 @@ def analyze_correlation():
         traceback.print_exc()
         return False
 
+@safe_execute
 def analyze_cointegration():
     """Analyze cointegration between stocks and suggest pairs."""
     print(f"\n{Colors.HEADER}{Colors.BOLD}📈 ANALYZE STOCK COINTEGRATION{Colors.ENDC}")
@@ -1391,96 +1460,240 @@ def show_menu():
 
     print(f"{Colors.OKCYAN}{'='*70}{Colors.ENDC}")
 
-def show_help():
-    """Show help and documentation."""
-    print(f"\n{Colors.HEADER}{Colors.BOLD}📚 HELP & DOCUMENTATION{Colors.ENDC}")
-    print(f"{Colors.OKCYAN}{'='*70}{Colors.ENDC}\n")
-    
-    print(f"{Colors.BOLD}About this Project:{Colors.ENDC}")
-    print("This is a TensorFlow-based stock arbitrage model that uses LSTM")
-    print("neural networks to predict price differences between AAPL and MSFT.\n")
-    
-    print(f"{Colors.BOLD}Workflow:{Colors.ENDC}")
-    print("1. Process Data: Downloads and processes stock data with features")
-    print("2. Train Model: Trains a 2-layer LSTM model with dropout")
-    print("3. Backtest: Tests trading strategy on historical data\n")
-    
-    print(f"{Colors.BOLD}Files:{Colors.ENDC}")
-    print("  • process_stock_data.py - Data processing script")
-    print("  • train_model.py - Model training script")
-    print("  • backtest_strategy.py - Backtesting script")
-    print("  • dashboard.py - Real-time Streamlit dashboard")
-    print("  • lstm_model.py - Model architecture definition\n")
-    
-    print(f"{Colors.BOLD}Requirements:{Colors.ENDC}")
-    print("  • Python 3.11 or 3.12 (TensorFlow doesn't support 3.14)")
-    print("  • All dependencies in requirements.txt\n")
-    
-    print(f"{Colors.WARNING}Note:{Colors.ENDC} Make sure TensorFlow is installed in a compatible")
-    print("Python environment before running training or backtesting!\n")
+# ── Per-option help text ─────────────────────────────────────────────────
+
+HELP_TEXT = {
+    '1': (
+        "📥  PROCESS STOCK DATA",
+        "Downloads OHLCV data from Yahoo Finance, calculates technical\n"
+        "  indicators (MA, RSI, MACD), merges sentiment & options data, and\n"
+        "  writes processed_stock_data.csv.\n\n"
+        "  Prerequisites : Internet connection\n"
+        "  Output        : processed_stock_data.csv"
+    ),
+    '2': (
+        "🧠  TRAIN LSTM MODEL",
+        "Trains a two-layer LSTM neural network on the processed data.\n"
+        "  Uses early stopping and a 60-day look-back window.\n\n"
+        "  Prerequisites : processed_stock_data.csv, Python 3.11/3.12\n"
+        "  Output        : lstm_price_difference_model.h5"
+    ),
+    '3': (
+        "🚀  RUN FULL PIPELINE",
+        "Runs Process → Train → Backtest in sequence.  Good for a first run\n"
+        "  or a full retrain after changing stock selection.\n\n"
+        "  Prerequisites : Internet connection, Python 3.11/3.12\n"
+        "  Output        : all pipeline artefacts"
+    ),
+    '4': (
+        "📊  BACKTEST TRADING STRATEGY",
+        "Simulates the trading strategy on historical data with realistic\n"
+        "  costs: commissions, SEC fees, slippage, borrow costs, and margin.\n"
+        "  Enforces market hours, stop-loss, and max-drawdown limits.\n\n"
+        "  Prerequisites : processed_stock_data.csv, trained model\n"
+        "  Output        : backtest_results.csv"
+    ),
+    '5': (
+        "💵  LIVE TRADING",
+        "Runs the trading loop against the Schwab API (or in paper-trading\n"
+        "  mode if credentials are not configured).  Requires a trained model\n"
+        "  and up-to-date processed data.\n\n"
+        "  Prerequisites : trained model, processed data, (optional) Schwab creds"
+    ),
+    '6': (
+        "⚙️   SETUP TRADING API",
+        "Walks you through creating a Schwab developer app and completing\n"
+        "  the OAuth flow.  Credentials are encrypted at rest with AES-256.\n\n"
+        "  Prerequisites : Schwab developer account"
+    ),
+    '7': (
+        "📊  ANALYZE CORRELATIONS",
+        "Computes and displays a correlation matrix for the selected stocks\n"
+        "  so you can identify good pairs-trading candidates."
+    ),
+    '8': (
+        "📈  ANALYZE COINTEGRATION",
+        "Runs the Engle-Granger cointegration test on every pair of selected\n"
+        "  stocks.  Cointegrated pairs are the strongest candidates for the\n"
+        "  mean-reversion strategy."
+    ),
+    '9': (
+        "🎨  LAUNCH DASHBOARD",
+        "Opens the Streamlit real-time dashboard in your default browser.\n"
+        "  Shows equity curve, drawdown, live signals, and trade history.\n\n"
+        "  Prerequisites : streamlit installed"
+    ),
+    '10': (
+        "🔄  SELECT STOCKS",
+        "Choose which stock symbols to use for data download, training,\n"
+        "  and trading.  Saved to selected_stocks.txt."
+    ),
+    '11': (
+        "💬  UPDATE SENTIMENT CACHE",
+        "Fetches Reddit (r/wallstreetbets) sentiment for the selected stocks\n"
+        "  and caches it locally.  Used as a feature during data processing.\n\n"
+        "  Prerequisites : Reddit API credentials configured"
+    ),
+    '12': (
+        "📊  UPDATE OPTIONS CACHE",
+        "Fetches current options-volume and implied-volatility data from\n"
+        "  yfinance and caches it.  Run daily via cron for best results."
+    ),
+    '13': (
+        "🧹  CLEAR YFINANCE CACHE",
+        "Deletes the local yfinance download cache.  Useful when downloads\n"
+        "  return stale or corrupted data."
+    ),
+    '14': (
+        "📋  PROJECT STATUS",
+        "Displays the current state of every pipeline artefact: data files,\n"
+        "  model, backtest results, credential files, and environment checks."
+    ),
+}
+
+
+def show_help(option=None):
+    """Show general help, or drill into a specific option number."""
+    print(f"\n{Colors.HEADER}{Colors.BOLD}{'='*70}")
+    print("  HELP & DOCUMENTATION")
+    print(f"{'='*70}{Colors.ENDC}\n")
+
+    if option and option in HELP_TEXT:
+        title, body = HELP_TEXT[option]
+        print(f"  {Colors.BOLD}{title}{Colors.ENDC}\n")
+        print(f"  {body}\n")
+        return
+
+    # ── General overview ────────────────────────────────────────────
+    print(f"  {Colors.BOLD}Recommended workflow:{Colors.ENDC}")
+    print("    1 → Process Data    (download & feature-engineer)")
+    print("    2 → Train Model     (LSTM neural network)")
+    print("    4 → Backtest        (simulate with realistic costs)")
+    print("    9 → Dashboard       (visualise results live)\n")
+
+    print(f"  {Colors.BOLD}Quick-launch commands (bypass the menu):{Colors.ENDC}")
+    print("    python main.py process      – option 1")
+    print("    python main.py train        – option 2")
+    print("    python main.py pipeline     – option 3")
+    print("    python main.py backtest     – option 4")
+    print("    python main.py dashboard    – option 9")
+    print("    python main.py status       – option 14\n")
+
+    print(f"  {Colors.BOLD}Flags:{Colors.ENDC}")
+    print("    --no-color   disable coloured output (or set NO_COLOR env var)")
+    print("    --help       show this help and exit\n")
+
+    print(f"  {Colors.BOLD}Want detail on a specific option?{Colors.ENDC}")
+    print("    Enter the option number at the menu prompt, then press 'h'.")
+    print("    Or type  ?N   (e.g. ?4) at the menu prompt.\n")
+
+
+# ── Command dispatch table ───────────────────────────────────────────────
+
+COMMANDS = {
+    "process":   ("1",  "Process stock data"),
+    "train":     ("2",  "Train LSTM model"),
+    "pipeline":  ("3",  "Run full pipeline"),
+    "backtest":  ("4",  "Backtest strategy"),
+    "live":      ("5",  "Live trading"),
+    "setup":     ("6",  "Setup Schwab API"),
+    "corr":      ("7",  "Correlation analysis"),
+    "coint":     ("8",  "Cointegration analysis"),
+    "dashboard": ("9",  "Launch dashboard"),
+    "stocks":    ("10", "Select stocks"),
+    "status":    ("14", "Show status"),
+    "help":      ("15", "Show help"),
+}
+
+CHOICE_MAP = {
+    '1':  process_data,
+    '2':  train_model,
+    '3':  run_full_pipeline,
+    '4':  backtest_strategy,
+    '5':  live_trade,
+    '6':  setup_live_trading,
+    '7':  analyze_correlation,
+    '8':  analyze_cointegration,
+    '9':  launch_dashboard,
+    '10': select_stocks,
+    '11': update_sentiment_cache_cli,
+    '12': update_options_cache_cli,
+    '13': clear_yfinance_cache,
+    '14': show_status,
+    '15': show_help,
+}
+
 
 def main():
-    """Main function to run the interactive CLI."""
+    """
+    Entry-point.  Supports an optional positional command for quick launch:
+        python main.py process
+        python main.py --help
+    Falls back to the interactive menu when no command is given.
+    """
+    # Strip --no-color from argv before argparse sees it (already consumed)
+    argv = [a for a in sys.argv[1:] if a != '--no-color']
+
+    # ── Quick-launch path ────────────────────────────────────────────
+    if argv:
+        cmd = argv[0].lower()
+
+        if cmd in ('--help', '-h', 'help'):
+            show_help()
+            return
+
+        if cmd in COMMANDS:
+            choice, _ = COMMANDS[cmd]
+            print_header()
+            handler = CHOICE_MAP.get(choice)
+            if handler:
+                handler()
+            return
+
+        # Unknown command – show usage
+        print_error(f"Unknown command: '{cmd}'")
+        print(f"\n  Available commands:\n")
+        for name, (_, desc) in sorted(COMMANDS.items()):
+            print(f"    {Colors.BOLD}{name:12s}{Colors.ENDC} {desc}")
+        print(f"\n  Or run without arguments for the interactive menu.\n")
+        return
+
+    # ── Interactive menu loop ────────────────────────────────────────
     clear_screen()
     print_header()
-    
+
     while True:
         show_menu()
-        choice = get_user_input("\nSelect an option (1-16)", None)
+        choice = get_user_input("\nSelect an option (1-16) or ?N for help on option N", None)
 
-        # Data & Model
-        if choice == '1':
-            process_data()
-        elif choice == '2':
-            train_model()
-        elif choice == '3':
-            run_full_pipeline()
+        if choice is None:
+            continue
 
-        # Trading
-        elif choice == '4':
-            backtest_strategy()
-        elif choice == '5':
-            live_trade()
-        elif choice == '6':
-            setup_live_trading()
+        # Inline help: user typed ?N
+        if choice.startswith('?'):
+            show_help(option=choice[1:])
+            input(f"\n{Colors.OKCYAN}Press Enter to continue...{Colors.ENDC}")
+            continue
 
-        # Analysis & Visualization
-        elif choice == '7':
-            analyze_correlation()
-        elif choice == '8':
-            analyze_cointegration()
-        elif choice == '9':
-            launch_dashboard()
-
-        # Configuration
-        elif choice == '10':
-            select_stocks()
-        elif choice == '11':
-            update_sentiment_cache_cli()
-        elif choice == '12':
-            update_options_cache_cli()
-        elif choice == '13':
-            clear_yfinance_cache()
-
-        # System & Help
-        elif choice == '14':
-            show_status()
-        elif choice == '15':
-            show_help()
-        elif choice == '16':
-            print(f"\n{Colors.OKGREEN}{Colors.BOLD}👋 Thanks for using Stock Arbitrage Model CLI!{Colors.ENDC}\n")
+        # Exit
+        if choice == '16':
+            print(f"\n{Colors.OKGREEN}{Colors.BOLD}Goodbye!{Colors.ENDC}\n")
             break
 
+        # Dispatch
+        handler = CHOICE_MAP.get(choice)
+        if handler is None:
+            print_error("Invalid choice! Please select 1-16, or ?N for help on option N.")
         else:
-            print_error("Invalid choice! Please select 1-16.")
-        
-        if choice != '16':
-            input(f"\n{Colors.OKCYAN}Press Enter to continue...{Colors.ENDC}")
+            handler()
+
+        input(f"\n{Colors.OKCYAN}Press Enter to continue...{Colors.ENDC}")
+
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print(f"\n\n{Colors.WARNING}Interrupted by user.{Colors.ENDC}")
-        print(f"{Colors.OKGREEN}👋 Goodbye!{Colors.ENDC}\n")
+        print(f"\n\n{Colors.WARNING}[CANCELLED] Interrupted by user.{Colors.ENDC}")
+        print(f"{Colors.OKGREEN}Goodbye!{Colors.ENDC}\n")
         sys.exit(0)

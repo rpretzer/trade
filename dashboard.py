@@ -6,6 +6,7 @@ Displays equity curve, positions, trades, and latest model signals
 import streamlit as st
 import pandas as pd
 import numpy as np
+import plotly.graph_objects as go
 from datetime import datetime
 import os
 import time
@@ -140,16 +141,22 @@ def main():
         
         st.markdown("---")
         
-        # File paths
+        # File paths with live existence checks
         st.subheader("📁 Data Files")
         results_file = st.text_input("Backtest Results CSV", value="backtest_results.csv")
+        st.caption(f"{'✅ Found' if os.path.exists(results_file) else '❌ Not found'}")
+
         model_file = st.text_input("Model File", value="lstm_price_difference_model.h5")
+        st.caption(f"{'✅ Found' if os.path.exists(model_file) else '❌ Not found'}")
+
         data_file = st.text_input("Processed Data CSV", value="processed_stock_data.csv")
-        
+        st.caption(f"{'✅ Found' if os.path.exists(data_file) else '❌ Not found'}")
+
         # Signal threshold
         signal_threshold = st.slider("Signal Threshold", 0.1, 1.0, 0.5, 0.1)
-        
+
         st.markdown("---")
+        st.caption(f"Last refreshed: {datetime.now().strftime('%H:%M:%S')}")
         st.info("💡 Dashboard displays backtest results and latest model signals")
     
     # Main content
@@ -277,61 +284,112 @@ def main():
         
         return
     
-    # Calculate key metrics
-    initial_capital = 10000  # Default, can be extracted from results
+    # ── Calculate all metrics once ──────────────────────────────────
+    initial_capital = 10000
     total_profit = results_df['profit'].sum()
     final_capital = initial_capital + total_profit
     total_return_pct = (total_profit / initial_capital) * 100
-    
+
     num_trades = len(results_df[results_df['signal'] != 'Hold'])
     winning_trades = len(results_df[results_df['profit'] > 0])
     losing_trades = len(results_df[results_df['profit'] < 0])
     win_rate = (winning_trades / num_trades * 100) if num_trades > 0 else 0
-    
-    # Display key metrics
+    avg_profit = total_profit / num_trades if num_trades > 0 else 0
+
+    # ── Top row: four key numbers ────────────────────────────────────
+    # delta must be numeric (or a formatted string starting with + / -)
+    # for Streamlit to colour it automatically
+    delta_str = f"+{format_percentage(total_return_pct)}" if total_return_pct >= 0 \
+                else format_percentage(total_return_pct)
+
     with col1:
-        st.metric("Initial Capital", format_currency(initial_capital))
-        st.metric("Final Capital", format_currency(final_capital), 
-                 delta=format_percentage(total_return_pct))
-    
+        st.metric("💰 Final Capital", format_currency(final_capital), delta=delta_str)
     with col2:
-        st.metric("Total Profit/Loss", format_currency(total_profit),
-                 delta=format_percentage(total_return_pct))
-        st.metric("Total Return", format_percentage(total_return_pct))
-    
+        st.metric("📈 Total Return", format_percentage(total_return_pct), delta=delta_str)
     with col3:
-        st.metric("Total Trades", num_trades)
-        st.metric("Win Rate", format_percentage(win_rate))
-    
+        st.metric("🎯 Win Rate", format_percentage(win_rate),
+                  delta=f"{winning_trades}W / {losing_trades}L")
     with col4:
-        st.metric("Winning Trades", winning_trades)
-        st.metric("Losing Trades", losing_trades)
-    
+        st.metric("📊 Total Trades", str(num_trades),
+                  delta=f"Avg {format_currency(avg_profit)}/trade")
+
+    # ── Secondary metrics in a collapsible expander ─────────────────
+    with st.expander("📋 Detailed Metrics", expanded=False):
+        d1, d2, d3, d4 = st.columns(4)
+        with d1:
+            st.metric("Starting Capital", format_currency(initial_capital))
+        with d2:
+            st.metric("Total Profit / Loss", format_currency(total_profit))
+        with d3:
+            st.metric("Winning Trades", str(winning_trades))
+        with d4:
+            st.metric("Losing Trades", str(losing_trades))
+
     st.markdown("---")
     
-    # Equity Curve
-    st.subheader("📊 Equity Curve")
-    
+    # ── Equity Curve with drawdown overlay ──────────────────────────
+    st.subheader("📊 Equity Curve & Drawdown")
+
     equity_df = load_equity_curve_from_results(results_df)
-    
+
     if equity_df is not None and not equity_df.empty:
-        # Create line chart
-        chart_data = equity_df.set_index('date')['equity']
-        
-        # Calculate max drawdown
-        running_max = chart_data.expanding().max()
-        drawdown = (chart_data - running_max) / running_max * 100
-        max_drawdown = drawdown.min()
-        
-        col_chart1, col_chart2 = st.columns([3, 1])
-        
-        with col_chart1:
-            st.line_chart(chart_data, use_container_width=True)
-        
-        with col_chart2:
-            st.metric("Max Drawdown", format_percentage(max_drawdown))
-            st.metric("Current Equity", format_currency(chart_data.iloc[-1]))
-    
+        dates = equity_df['date']
+        equity = equity_df['equity']
+
+        running_max = equity.expanding().max()
+        drawdown_pct = (equity - running_max) / running_max * 100
+        max_drawdown = drawdown_pct.min()
+
+        fig = go.Figure()
+
+        # Equity line (primary y-axis)
+        fig.add_trace(go.Scatter(
+            x=dates, y=equity,
+            name="Equity",
+            line=dict(color="#1f77b4", width=2),
+            yaxis="y"
+        ))
+
+        # Drawdown shading (secondary y-axis)
+        fig.add_trace(go.Scatter(
+            x=dates, y=drawdown_pct,
+            name="Drawdown %",
+            fill="tozeroy",
+            fillcolor="rgba(220, 53, 69, 0.25)",
+            line=dict(color="rgba(220, 53, 69, 0.6)", width=1),
+            yaxis="y2"
+        ))
+
+        fig.update_layout(
+            height=380,
+            margin=dict(l=10, r=10, t=30, b=30),
+            legend=dict(orientation="h", yanchor="bottom", y=-0.15),
+            hovermode="x unified",
+            yaxis=dict(
+                title_text="Equity ($)",
+                tickprefix="$",
+                showgrid=True,
+                gridcolor="#eee"
+            ),
+            yaxis2=dict(
+                title_text="Drawdown (%)",
+                ticksuffix="%",
+                overlaying="y",
+                side="right",
+                range=[min(drawdown_pct.min() * 1.5, -1), 1],
+                showgrid=False
+            ),
+            xaxis=dict(showgrid=False)
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Summary stats below chart
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Max Drawdown", format_percentage(max_drawdown))
+        c2.metric("Current Equity", format_currency(equity.iloc[-1]))
+        c3.metric("Peak Equity", format_currency(running_max.iloc[-1]))
+
     st.markdown("---")
     
     # Latest Signals and Positions

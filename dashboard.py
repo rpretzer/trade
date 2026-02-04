@@ -52,6 +52,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+@st.cache_data(ttl=60)  # Cache for 60 seconds
 def load_backtest_results(filename='backtest_results.csv'):
     """Load backtest results from CSV."""
     try:
@@ -60,7 +61,19 @@ def load_backtest_results(filename='backtest_results.csv'):
             return df
         return None
     except Exception as e:
-        st.error(f"Error loading backtest results: {e}")
+        st.error(f"❌ Error loading backtest results: {e}")
+        with st.expander("🔍 Troubleshooting"):
+            st.markdown("""
+            **Possible causes**:
+            - File is corrupted or incomplete
+            - CSV format doesn't match expected structure
+            - File is being written by another process
+
+            **How to fix**:
+            1. Check file exists: `ls -lh backtest_results.csv`
+            2. Verify it's not empty: `wc -l backtest_results.csv`
+            3. Re-run backtest if needed: `python backtest_strategy.py`
+            """)
         return None
 
 def load_equity_curve_from_results(results_df):
@@ -141,12 +154,14 @@ def main():
     
     # Main content
     col1, col2, col3, col4 = st.columns(4)
-    
-    # Load backtest results
-    results_df = load_backtest_results(results_file)
-    
+
+    # Load backtest results with loading spinner
+    with st.spinner("📊 Loading backtest results..."):
+        results_df = load_backtest_results(results_file)
+
     if results_df is None or results_df.empty:
-        st.warning("⚠️ No backtest results found.")
+        st.warning("⚠️ No backtest results found")
+        st.info("👉 Run a backtest to generate data for this dashboard")
         
         st.markdown("### 🚀 Run Backtest")
         st.info("Run a backtest to generate data for the dashboard. This will process data, train the model, and generate backtest results.")
@@ -156,24 +171,72 @@ def main():
         with col_run1:
             st.markdown("#### Quick Run (Use Default Settings)")
             if st.button("📊 Run Backtest with Defaults", type="primary", use_container_width=True):
-                with st.spinner("Running backtest with default settings... This may take several minutes."):
-                    try:
-                        result = subprocess.run(
-                            [sys.executable, 'backtest_strategy.py'],
-                            capture_output=True,
-                            text=True,
-                            timeout=600  # 10 minute timeout
-                        )
-                        if result.returncode == 0:
-                            st.success("✅ Backtest completed successfully!")
-                            st.rerun()  # Refresh to load new data
-                        else:
-                            st.error("❌ Backtest failed. See error details below.")
+                progress_text = st.empty()
+                progress_bar = st.progress(0)
+
+                try:
+                    # Use Python 3.12 venv if available for TensorFlow support
+                    python_cmd = sys.executable
+                    venv_python = os.path.join(os.getcwd(), 'venv_py312', 'bin', 'python')
+                    if os.path.exists(venv_python):
+                        python_cmd = venv_python
+
+                    progress_text.text("🚀 Starting backtest...")
+                    progress_bar.progress(10)
+
+                    progress_text.text("📊 Running backtest (this may take 5-10 minutes)...")
+                    progress_bar.progress(30)
+
+                    result = subprocess.run(
+                        [python_cmd, 'backtest_strategy.py'],
+                        capture_output=True,
+                        text=True,
+                        timeout=600  # 10 minute timeout
+                    )
+
+                    progress_bar.progress(90)
+
+                    if result.returncode == 0:
+                        progress_bar.progress(100)
+                        st.success("✅ Backtest completed successfully!")
+                        st.balloons()
+                        st.info("📊 Dashboard will refresh in 3 seconds to show new results...")
+                        import time
+                        time.sleep(3)
+                        st.rerun()  # Refresh to load new data
+                    else:
+                        st.error("❌ Backtest failed")
+                        with st.expander("📋 Error Details"):
                             st.code(result.stderr if result.stderr else result.stdout)
-                    except subprocess.TimeoutExpired:
-                        st.error("⏱️ Backtest timed out. Please run manually or check system resources.")
-                    except Exception as e:
-                        st.error(f"❌ Error running backtest: {e}")
+                        with st.expander("🔍 Troubleshooting"):
+                            st.markdown("""
+                            **Common causes**:
+                            - Missing dependencies (TensorFlow)
+                            - Insufficient data
+                            - Model file missing
+
+                            **How to fix**:
+                            1. Check prerequisites above
+                            2. Run manually to see detailed errors: `python backtest_strategy.py`
+                            3. Check logs in `logs/` directory
+                            """)
+                except subprocess.TimeoutExpired:
+                    st.error("⏱️ Backtest timed out (>10 minutes)")
+                    with st.expander("🔍 What to do"):
+                        st.markdown("""
+                        **Why this happens**:
+                        - Large dataset (>1 year of data)
+                        - Slow CPU
+                        - Insufficient RAM
+
+                        **Solutions**:
+                        1. Run manually: `python backtest_strategy.py`
+                        2. Reduce date range in data
+                        3. Use a faster machine
+                        """)
+                except Exception as e:
+                    st.error(f"❌ Unexpected error: {e}")
+                    st.info("Try running manually: `python backtest_strategy.py`")
         
         with col_run2:
             st.markdown("#### Manual Run")
@@ -279,11 +342,23 @@ def main():
         
         # Get latest signals from model
         if TF_AVAILABLE and os.path.exists(model_file) and os.path.exists(data_file):
-            with st.spinner("Getting latest signal..."):
+            with st.spinner("🔮 Generating latest trading signal..."):
                 latest_signal, error = get_latest_signal(model_file, data_file, signal_threshold)
-                
+
                 if error:
-                    st.error(f"Error getting signal: {error}")
+                    st.error(f"❌ Error generating signal: {error}")
+                    with st.expander("🔍 Troubleshooting"):
+                        st.markdown("""
+                        **Common issues**:
+                        - Model file is corrupted
+                        - Data file format has changed
+                        - Not enough recent data (need 60+ days)
+
+                        **Quick fixes**:
+                        1. Retrain model: `python train_model.py`
+                        2. Update data: `./run_daily_data_update.sh`
+                        3. Check model file exists and is >1MB
+                        """)
                 elif latest_signal:
                     # Display signal with color coding
                     if latest_signal == 'Buy AAPL, Sell MSFT':

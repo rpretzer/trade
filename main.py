@@ -133,6 +133,86 @@ def get_user_input(prompt, default=None, input_type=str, validator=None):
 def check_file_exists(filename):
     return os.path.exists(filename)
 
+
+# ── Auto-backup before destructive writes ───────────────────────────────
+
+def backup_file(path):
+    """
+    Copy *path* to *path*.bak (overwriting any previous backup).
+    Returns True on success, False if the source doesn't exist.
+    """
+    import shutil
+    if not os.path.exists(path):
+        return False
+    backup_path = path + ".bak"
+    shutil.copy2(path, backup_path)
+    print_info(f"  Backed up {path} → {backup_path}")
+    return True
+
+
+# ── Tab completion for the menu prompt ───────────────────────────────────
+
+def _setup_readline_completer():
+    """Install a tab completer for option numbers and quick-launch names."""
+    try:
+        import readline
+
+        _completions = [str(i) for i in range(1, 17)] + list(COMMANDS.keys())
+
+        def _completer(text, state):
+            matches = [c for c in _completions if c.startswith(text)]
+            return matches[state] if state < len(matches) else None
+
+        readline.set_completer(_completer)
+        readline.parse_and_bind("tab: complete")
+    except ImportError:
+        pass  # readline not available on all platforms
+
+
+# ── First-time tutorial ──────────────────────────────────────────────────
+
+def run_tutorial():
+    """
+    Guided walkthrough for new users.  Fires automatically when the
+    pipeline artefacts (data, model, backtest results) are all missing.
+    """
+    data_exists  = check_file_exists("processed_stock_data.csv")
+    model_exists = check_file_exists("lstm_price_difference_model.h5")
+    bt_exists    = check_file_exists("backtest_results.csv")
+
+    # Only show when nothing has been generated yet
+    if data_exists or model_exists or bt_exists:
+        return
+
+    print(f"\n{Colors.HEADER}{Colors.BOLD}{'='*70}")
+    print("  WELCOME – FIRST-TIME SETUP GUIDE")
+    print(f"{'='*70}{Colors.ENDC}\n")
+
+    print(f"  {Colors.BOLD}It looks like this is your first time running the system.{Colors.ENDC}")
+    print(f"  No data, model, or backtest results were found.\n")
+
+    print(f"  {Colors.BOLD}The recommended path is:{Colors.ENDC}")
+    print(f"    {Colors.OKGREEN}1.{Colors.ENDC} Process Data   – downloads & engineers features")
+    print(f"    {Colors.OKGREEN}2.{Colors.ENDC} Train Model     – fits the LSTM")
+    print(f"    {Colors.OKGREEN}4.{Colors.ENDC} Backtest        – simulates trading on history")
+    print(f"    {Colors.OKGREEN}9.{Colors.ENDC} Dashboard       – visualises everything\n")
+
+    print(f"  {Colors.BOLD}Quick tips:{Colors.ENDC}")
+    print("    • Type  ?N  at the menu (e.g. ?1) to read about any option")
+    print("    • Press Tab to autocomplete option numbers or command names")
+    print("    • You can also skip the menu entirely:")
+    print("        python main.py pipeline   – runs steps 1-2-4 in one go\n")
+
+    run_now = get_user_input(
+        "  Run the full pipeline now (Process → Train → Backtest)? (y/n)",
+        "n"
+    )
+    if run_now and run_now.lower() == 'y':
+        run_full_pipeline()
+        input(f"\n{Colors.OKCYAN}Press Enter to continue...{Colors.ENDC}")
+    else:
+        print_info("  No problem – just pick an option from the menu below.\n")
+
 @safe_execute
 def update_sentiment_cache_cli():
     """Update Reddit sentiment cache via CLI."""
@@ -429,6 +509,8 @@ def process_data():
         if overwrite.lower() != 'y':
             print_info("Skipping data processing...")
             return True
+        # Auto-backup before overwriting
+        backup_file('processed_stock_data.csv')
     
     # Offer to clear cache if user wants
     print_info("If you're experiencing download errors, clearing the cache may help.")
@@ -509,14 +591,15 @@ def train_model():
         return False
     
     print_info("Training model... This may take several minutes...\n")
-    
+
     try:
-        # Modify train_model.py to accept command-line args or use environment variables
-        # For now, we'll modify the script temporarily or use a simpler approach
-        # Actually, let's just run it and note that parameters are hardcoded
+        # Back up the existing model so it can be restored if training fails
+        if check_file_exists('lstm_price_difference_model.h5'):
+            backup_file('lstm_price_difference_model.h5')
+
         print_warning("Note: Training will use default parameters from train_model.py")
         print_info("To customize, edit train_model.py directly\n")
-        
+
         python_cmd = get_python_cmd()
         result = subprocess.run([python_cmd, 'train_model.py'],
                               capture_output=False, text=True)
@@ -1659,8 +1742,10 @@ def main():
         return
 
     # ── Interactive menu loop ────────────────────────────────────────
+    _setup_readline_completer()
     clear_screen()
     print_header()
+    run_tutorial()          # no-op if artefacts already exist
 
     while True:
         show_menu()

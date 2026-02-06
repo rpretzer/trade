@@ -1,0 +1,4 @@
+# LSTM model training
+# Note: TensorFlow requires Python 3.11 or 3.12 (not yet compatible with 3.14)
+-r requirements.txt
+tensorflow==2.15.0

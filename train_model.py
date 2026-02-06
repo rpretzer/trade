@@ -7,6 +7,7 @@ import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from constants import feature_names, TICKER_LONG, TICKER_SHORT
 
 # Try importing XGBoost
 try:
@@ -58,50 +59,8 @@ def prepare_data(csv_file='processed_stock_data.csv', timesteps=60, test_size=0.
     print(f"Loading data from {csv_file}...")
     df = pd.read_csv(csv_file, index_col=0, parse_dates=True)
     
-    # Use normalized features for training
-    # Include ALL new features: prices, volumes, moving averages, RSI, MACD, sentiment, options
-    feature_columns_normalized = [
-        # Core price data
-        'AAPL_normalized', 'MSFT_normalized', 'Price_Difference_normalized',
-        # Volume data
-        'AAPL_Volume_normalized', 'MSFT_Volume_normalized',
-        # Moving averages
-        'AAPL_MA5_normalized', 'MSFT_MA5_normalized',
-        'AAPL_MA20_normalized', 'MSFT_MA20_normalized',
-        'AAPL_Volume_MA5_normalized', 'MSFT_Volume_MA5_normalized',
-        # Technical indicators - RSI
-        'AAPL_RSI_normalized', 'MSFT_RSI_normalized',
-        # Technical indicators - MACD
-        'AAPL_MACD_normalized', 'MSFT_MACD_normalized',
-        'AAPL_MACD_Signal_normalized', 'MSFT_MACD_Signal_normalized',
-        'AAPL_MACD_Histogram_normalized', 'MSFT_MACD_Histogram_normalized',
-        # Sentiment
-        'AAPL_Reddit_Sentiment_normalized', 'MSFT_Reddit_Sentiment_normalized',
-        # Options volume
-        'AAPL_Options_Volume_normalized', 'MSFT_Options_Volume_normalized'
-    ]
-    
-    # Fallback to original columns if normalized don't exist
-    feature_columns_original = [
-        # Core price data
-        'AAPL', 'MSFT', 'Price_Difference',
-        # Volume data
-        'AAPL_Volume', 'MSFT_Volume',
-        # Moving averages
-        'AAPL_MA5', 'MSFT_MA5',
-        'AAPL_MA20', 'MSFT_MA20',
-        'AAPL_Volume_MA5', 'MSFT_Volume_MA5',
-        # Technical indicators - RSI
-        'AAPL_RSI', 'MSFT_RSI',
-        # Technical indicators - MACD
-        'AAPL_MACD', 'MSFT_MACD',
-        'AAPL_MACD_Signal', 'MSFT_MACD_Signal',
-        'AAPL_MACD_Histogram', 'MSFT_MACD_Histogram',
-        # Sentiment
-        'AAPL_Reddit_Sentiment', 'MSFT_Reddit_Sentiment',
-        # Options volume
-        'AAPL_Options_Volume', 'MSFT_Options_Volume'
-    ]
+    feature_columns_normalized = feature_names(normalized=True)
+    feature_columns_original   = feature_names(normalized=False)
     
     # Try to use normalized columns first
     available_normalized = [col for col in feature_columns_normalized if col in df.columns]
@@ -120,16 +79,10 @@ def prepare_data(csv_file='processed_stock_data.csv', timesteps=60, test_size=0.
     else:
         # Fallback to basic features if new ones aren't available
         print("Warning: New features not found. Using basic features only.")
-        basic_features = [
-            'AAPL_normalized', 'MSFT_normalized', 'Price_Difference_normalized',
-            'AAPL_Volume_normalized', 'MSFT_Volume_normalized',
-            'AAPL_MA5_normalized', 'MSFT_MA5_normalized',
-            'AAPL_MA20_normalized', 'MSFT_MA20_normalized',
-            'AAPL_Volume_MA5_normalized', 'MSFT_Volume_MA5_normalized'
-        ]
+        basic_features = feature_names(basic_only=True)
         feature_columns = [col for col in basic_features if col in df.columns]
         if not feature_columns:
-            feature_columns = ['AAPL', 'MSFT', 'Price_Difference', 'AAPL_Volume', 'MSFT_Volume']
+            feature_columns = feature_names(normalized=False)[:5]
             scaler = StandardScaler()
             data = scaler.fit_transform(df[feature_columns])
         else:
@@ -374,7 +327,45 @@ if __name__ == "__main__":
         lstm_model_path = 'lstm_price_difference_model.h5'
         lstm_model.save(lstm_model_path)
         print(f"\nLSTM model saved to: {lstm_model_path}")
-        
+
+        # ── Register LSTM in model registry ──────────────────────────────
+        from model_management import (
+            ModelRegistry, ModelVersion, ModelStatus, calculate_model_checksum
+        )
+        from datetime import datetime as _dt
+
+        registry = ModelRegistry()
+        lstm_checksum = calculate_model_checksum(lstm_model_path)
+        existing_lstm = [m for m in registry.list_models() if m.model_type == 'LSTM']
+        lstm_status = ModelStatus.SHADOW if registry.get_production_model() else ModelStatus.PRODUCTION
+
+        registry.register_model(ModelVersion(
+            version=f"1.0.{len(existing_lstm)}",
+            model_type='LSTM',
+            created_at=_dt.now().isoformat(),
+            created_by='train_model',
+            config={
+                'epochs': EPOCHS, 'batch_size': BATCH_SIZE,
+                'timesteps': TIMESTEPS, 'dropout_rate': 0.2,
+            },
+            features=feature_names,
+            target='Price_Difference',
+            training_samples=len(X_train_lstm),
+            training_date_range='auto',
+            train_metrics={
+                'mse': float(lstm_history.history['loss'][-1]),
+                'mae': float(lstm_history.history['mae'][-1]),
+            },
+            validation_metrics={
+                'mse': float(lstm_history.history['val_loss'][-1]),
+                'mae': float(lstm_history.history['val_mae'][-1]),
+            },
+            model_path=lstm_model_path,
+            model_checksum=lstm_checksum,
+            status=lstm_status,
+        ))
+        print(f"  Registered LSTM 1.0.{len(existing_lstm)} [{lstm_status.value}]")
+
         # Prepare data for XGBoost
         if XGBOOST_AVAILABLE:
             print("\n" + "=" * 70)
@@ -398,12 +389,42 @@ if __name__ == "__main__":
             xgb_model_path = 'xgb_price_difference_model.json'
             xgb_model.save_model(xgb_model_path)
             print(f"\nXGBoost model saved to: {xgb_model_path}")
-        
+
+            # ── Register XGBoost in model registry ────────────────────
+            xgb_checksum = calculate_model_checksum(xgb_model_path)
+            existing_xgb = [m for m in registry.list_models() if m.model_type == 'XGBoost']
+
+            registry.register_model(ModelVersion(
+                version=f"1.0.{len(existing_xgb)}",
+                model_type='XGBoost',
+                created_at=_dt.now().isoformat(),
+                created_by='train_model',
+                config={
+                    'n_estimators': 100, 'max_depth': 6, 'learning_rate': 0.1,
+                },
+                features=feature_names,
+                target='Price_Difference',
+                training_samples=len(X_train_xgb),
+                training_date_range='auto',
+                train_metrics={
+                    'mse': xgb_metrics['train_mse'],
+                    'mae': xgb_metrics['train_mae'],
+                },
+                validation_metrics={
+                    'mse': xgb_metrics['test_mse'],
+                    'mae': xgb_metrics['test_mae'],
+                },
+                model_path=xgb_model_path,
+                model_checksum=xgb_checksum,
+                status=ModelStatus.TESTING,
+            ))
+            print(f"  Registered XGBoost 1.0.{len(existing_xgb)} [TESTING]")
+
         print("\n" + "=" * 70)
         print("TRAINING COMPLETED SUCCESSFULLY!")
         print("=" * 70)
         print(f"\nModels trained with {len(feature_names)} features:")
-        print(f"  • Price data (AAPL, MSFT, Price_Difference)")
+        print(f"  • Price data ({TICKER_LONG}, {TICKER_SHORT}, Price_Difference)")
         print(f"  • Volume data")
         print(f"  • Moving averages (MA5, MA20)")
         print(f"  • Technical indicators (RSI, MACD)")

@@ -1,0 +1,4 @@
+# All optional feature sets combined
+-r requirements-lstm.txt
+-r requirements-live.txt
+-r requirements-advanced.txt

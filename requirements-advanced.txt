@@ -1,0 +1,4 @@
+# Advanced analysis: cointegration tests and market-hours calendar
+-r requirements.txt
+statsmodels>=0.14.0
+pandas-market-calendars==4.3.0

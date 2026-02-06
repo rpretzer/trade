@@ -50,7 +50,8 @@ def get_selected_stocks():
         except Exception:
             pass
     # Default stocks
-    return 'AAPL', 'MSFT'
+    from constants import TICKER_LONG, TICKER_SHORT
+    return TICKER_LONG, TICKER_SHORT
 
 # Function to get last trading day for a market
 def get_last_trading_day(market='NYSE', timezone_str='America/New_York'):

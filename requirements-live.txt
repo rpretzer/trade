@@ -1,0 +1,4 @@
+# Live trading via the Schwab API
+# Note: schwab-py requires Python 3.10+
+-r requirements.txt
+schwab-py>=0.1.0

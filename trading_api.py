@@ -18,6 +18,11 @@ from exceptions import (
     PriceNotAvailableError, StaleDataError, InvalidOrderError,
     InsufficientFundsError, OrderRejectedError
 )
+from constants import (
+    TICKER_LONG, TICKER_SHORT,
+    SIGNAL_BUY_LONG, SIGNAL_BUY_SHORT, SIGNAL_HOLD,
+    PRICE_SANITY_RANGES,
+)
 from error_handling import CircuitBreaker, retry, RetryConfig, RateLimiter
 
 logger = logging.getLogger(__name__)
@@ -29,8 +34,8 @@ try:
     SCHWAB_AVAILABLE = True
 except ImportError:
     SCHWAB_AVAILABLE = False
-    print("Warning: Schwab client not available. Install with: pip install schwab-py")
-    print("Note: TD Ameritrade API is deprecated. Schwab API requires Python 3.10+")
+    logger.warning("Schwab client not available. Install with: pip install schwab-py")
+    logger.warning("TD Ameritrade API is deprecated. Schwab API requires Python 3.10+")
 
 class TradingAPI:
     """
@@ -134,14 +139,14 @@ class TradingAPI:
         using the OAuth flow. See schwab-py documentation for details.
         """
         if self.paper_trading:
-            print("📝 Paper Trading Mode: All trades will be simulated")
+            logger.info("Paper Trading Mode: All trades will be simulated")
             self.client = None  # No API connection needed for paper trading
             return True
         
         if not SCHWAB_AVAILABLE:
-            print("Error: Schwab API not available")
-            print("Install with: pip install schwab-py")
-            print("Note: Requires Python 3.10+")
+            logger.error("Schwab API not available")
+            logger.error("Install with: pip install schwab-py")
+            logger.error("Requires Python 3.10+")
             return False
         
         try:
@@ -155,33 +160,31 @@ class TradingAPI:
                         self.app_secret
                     )
                     if self.client:
-                        print("✓ Connected to Schwab API using saved credentials")
+                        logger.info("Connected to Schwab API using saved credentials")
                         return True
                 except Exception as e:
-                    print(f"Warning: Could not load saved credentials: {e}")
-                    print("You may need to regenerate your token (they expire in 7 days)")
+                    logger.warning("Could not load saved credentials: %s", e)
+                    logger.warning("You may need to regenerate your token (they expire in 7 days)")
             
             # If no valid credentials, need to run OAuth flow
             if not self.client:
-                print("⚠️  Schwab API Authentication Required")
-                print("=" * 70)
-                print("To connect to Schwab API:")
-                print("1. Create a new app at: https://developer.schwab.com")
-                print("2. Note: App approval can take multiple days")
-                print("3. Use 127.0.0.1 (not localhost) as callback URL")
-                print("4. Run the OAuth flow (requires browser interaction)")
-                print("5. Tokens expire in 7 days (not 90 days like TDA)")
-                print()
-                print("For now, switching to paper trading mode...")
-                print("See: https://schwab-py.readthedocs.io/en/latest/")
+                logger.warning("Schwab API Authentication Required")
+                logger.info("To connect to Schwab API:")
+                logger.info("1. Create a new app at: https://developer.schwab.com")
+                logger.info("2. Note: App approval can take multiple days")
+                logger.info("3. Use 127.0.0.1 (not localhost) as callback URL")
+                logger.info("4. Run the OAuth flow (requires browser interaction)")
+                logger.info("5. Tokens expire in 7 days (not 90 days like TDA)")
+                logger.warning("For now, switching to paper trading mode...")
+                logger.info("See: https://schwab-py.readthedocs.io/en/latest/")
                 self.paper_trading = True
                 return True
             
             return True
             
         except Exception as e:
-            print(f"Error connecting to Schwab API: {e}")
-            print("Switching to paper trading mode...")
+            logger.error("Error connecting to Schwab API: %s", e)
+            logger.warning("Switching to paper trading mode...")
             self.paper_trading = True
             return True
     
@@ -210,7 +213,7 @@ class TradingAPI:
                     }
             return None
         except Exception as e:
-            print(f"Error fetching account balance: {e}")
+            logger.error("Error fetching account balance: %s", e)
             return None
     
     def get_account_balance(self):
@@ -233,8 +236,8 @@ class TradingAPI:
             if loop.is_running():
                 # If loop is already running, we need to use a different approach
                 # For now, return None and suggest using async methods
-                print("Warning: Cannot run async method in existing event loop")
-                print("Consider using async methods directly or running in a new thread")
+                logger.warning("Cannot run async method in existing event loop")
+                logger.warning("Consider using async methods directly or running in a new thread")
                 return None
             else:
                 return loop.run_until_complete(self._get_account_balance_async())
@@ -242,7 +245,7 @@ class TradingAPI:
             # No event loop, create one
             return asyncio.run(self._get_account_balance_async())
         except Exception as e:
-            print(f"Error fetching account balance: {e}")
+            logger.error("Error fetching account balance: %s", e)
             return None
     
     async def _get_current_price_async(self, symbol):
@@ -270,7 +273,7 @@ class TradingAPI:
                     }
             return None
         except Exception as e:
-            print(f"Error fetching price for {symbol}: {e}")
+            logger.error("Error fetching price for %s: %s", symbol, e)
             return None
 
     def get_current_price(self, symbol, max_staleness_seconds=2):
@@ -373,14 +376,14 @@ class TradingAPI:
                             }
             return {'quantity': 0, 'average_price': 0}
         except Exception as e:
-            print(f"Error fetching position for {symbol}: {e}")
+            logger.error("Error fetching position for %s: %s", symbol, e)
             return {'quantity': 0, 'average_price': 0}
     
     def get_position(self, symbol):
         """Get current position for a symbol (synchronous wrapper)."""
         if self.paper_trading:
             # In paper trading, track positions in memory
-            # TODO: Implement proper position tracking in paper trading mode
+            # Paper trading positions are tracked by live_trading.save_positions/load_positions.
             return {'quantity': 0, 'average_price': 0}
         
         if not self.client:
@@ -389,14 +392,14 @@ class TradingAPI:
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
-                print("Warning: Cannot run async method in existing event loop")
+                logger.warning("Cannot run async method in existing event loop")
                 return {'quantity': 0, 'average_price': 0}
             else:
                 return loop.run_until_complete(self._get_position_async(symbol))
         except RuntimeError:
             return asyncio.run(self._get_position_async(symbol))
         except Exception as e:
-            print(f"Error fetching position for {symbol}: {e}")
+            logger.error("Error fetching position for %s: %s", symbol, e)
             return {'quantity': 0, 'average_price': 0}
     
     async def _place_order_async(self, symbol, quantity, side, order_type='MARKET', price=None):
@@ -419,7 +422,7 @@ class TradingAPI:
                 else:  # SELL
                     order = equity_sell_limit(symbol, quantity, price)
             else:
-                print(f"Error: Unsupported order type: {order_type}")
+                logger.error("Unsupported order type: %s", order_type)
                 return None
             
             # Place order
@@ -427,7 +430,7 @@ class TradingAPI:
             return response.json() if hasattr(response, 'json') else response
             
         except Exception as e:
-            print(f"Error placing order: {e}")
+            logger.error("Error placing order: %s", e)
             return None
     
     def place_order(self, symbol, quantity, side, order_type='MARKET', price=None):
@@ -460,133 +463,97 @@ class TradingAPI:
             return order
         
         if not self.client:
-            print("Error: Not connected to Schwab API")
+            logger.error("Not connected to Schwab API")
             return None
         
         try:
             if not self.account_id:
-                print("Error: Account ID not set")
+                logger.error("Account ID not set")
                 return None
             
             # Run async method
             loop = asyncio.get_event_loop()
             if loop.is_running():
-                print("Warning: Cannot run async method in existing event loop")
-                print("Consider using async methods directly")
+                logger.warning("Cannot run async method in existing event loop")
+                logger.warning("Consider using async methods directly")
                 return None
             else:
                 return loop.run_until_complete(self._place_order_async(symbol, quantity, side, order_type, price))
         except RuntimeError:
             return asyncio.run(self._place_order_async(symbol, quantity, side, order_type, price))
         except Exception as e:
-            print(f"Error placing order: {e}")
+            logger.error("Error placing order: %s", e)
             return None
     
     def execute_arbitrage_trade(self, signal, account_balance, max_position_size=0.1):
         """
         Execute arbitrage trade based on signal.
-        
+
         Args:
-            signal: Trading signal ('Buy AAPL, Sell MSFT', 'Buy MSFT, Sell AAPL', or 'Hold')
+            signal: Trading signal (SIGNAL_BUY_LONG, SIGNAL_BUY_SHORT, or SIGNAL_HOLD)
             account_balance: Account balance dictionary
             max_position_size: Maximum percentage of account to use per trade (default 0.1 = 10%)
-            
+
         Returns:
             List of executed orders
         """
         orders = []
-        
-        if signal == 'Hold':
-            print("No trade: Holding position")
+
+        if signal == SIGNAL_HOLD:
+            logger.info("No trade: Holding position")
             return orders
-        
+
+        if signal == SIGNAL_BUY_LONG:
+            buy_sym, sell_sym = TICKER_LONG, TICKER_SHORT
+        elif signal == SIGNAL_BUY_SHORT:
+            buy_sym, sell_sym = TICKER_SHORT, TICKER_LONG
+        else:
+            logger.warning("Unrecognised signal '%s'. No trade.", signal)
+            return orders
+
         available_funds = account_balance.get('available_funds', 0)
         position_value = available_funds * max_position_size
-        
+
         try:
-            if signal == 'Buy AAPL, Sell MSFT':
-                # Buy AAPL, Sell MSFT
-                print(f"Executing: Buy AAPL, Sell MSFT")
-                print(f"Using ${position_value:.2f} per position")
+            logger.info("Executing: %s", signal)
+            logger.info("Using $%.2f per position", position_value)
 
-                # FIXED: Get current prices instead of using hardcoded values
-                aapl_price = self.get_current_price('AAPL')
-                msft_price = self.get_current_price('MSFT')
+            # Fetch live prices for both legs
+            buy_price  = self.get_current_price(buy_sym)
+            sell_price = self.get_current_price(sell_sym)
 
-                if not aapl_price or not msft_price:
-                    print("Error: Could not fetch current prices. Aborting trade.")
+            if not buy_price or not sell_price:
+                logger.error("Could not fetch current prices. Aborting trade.")
+                return orders
+
+            # Sanity-check each price against its configured range
+            for sym, price in [(buy_sym, buy_price), (sell_sym, sell_price)]:
+                lo, hi = PRICE_SANITY_RANGES.get(sym, (0, float('inf')))
+                if price < lo or price > hi:
+                    logger.warning("%s price $%.2f seems unusual. Aborting trade.", sym, price)
                     return orders
 
-                # Sanity check: prices should be reasonable
-                if aapl_price < 50 or aapl_price > 500:
-                    print(f"Warning: AAPL price ${aapl_price:.2f} seems unusual. Aborting trade.")
-                    return orders
-                if msft_price < 100 or msft_price > 1000:
-                    print(f"Warning: MSFT price ${msft_price:.2f} seems unusual. Aborting trade.")
-                    return orders
+            buy_qty  = int(position_value / buy_price)
+            sell_qty = int(position_value / sell_price)
 
-                # Calculate quantities based on ACTUAL current prices
-                aapl_qty = int(position_value / aapl_price)
-                msft_qty = int(position_value / msft_price)
+            logger.info("Current prices: %s=$%.2f, %s=$%.2f", buy_sym, buy_price, sell_sym, sell_price)
+            logger.info("Order quantities: %s=%s shares, %s=%s shares", buy_sym, buy_qty, sell_sym, sell_qty)
 
-                print(f"Current prices: AAPL=${aapl_price:.2f}, MSFT=${msft_price:.2f}")
-                print(f"Order quantities: AAPL={aapl_qty} shares, MSFT={msft_qty} shares")
+            # Place buy order
+            order1 = self.place_order(buy_sym, buy_qty, 'BUY', 'MARKET')
+            if order1:
+                orders.append(order1)
+                logger.info("Buy order placed for %s: %s shares @ $%.2f", buy_sym, buy_qty, buy_price)
 
-                # Place buy order for AAPL
-                order1 = self.place_order('AAPL', aapl_qty, 'BUY', 'MARKET')
-                if order1:
-                    orders.append(order1)
-                    print(f"✓ Buy order placed for AAPL: {aapl_qty} shares @ ${aapl_price:.2f}")
+            # Place sell order
+            order2 = self.place_order(sell_sym, sell_qty, 'SELL', 'MARKET')
+            if order2:
+                orders.append(order2)
+                logger.info("Sell order placed for %s: %s shares @ $%.2f", sell_sym, sell_qty, sell_price)
 
-                # Place sell order for MSFT
-                order2 = self.place_order('MSFT', msft_qty, 'SELL', 'MARKET')
-                if order2:
-                    orders.append(order2)
-                    print(f"✓ Sell order placed for MSFT: {msft_qty} shares @ ${msft_price:.2f}")
-
-            elif signal == 'Buy MSFT, Sell AAPL':
-                # Buy MSFT, Sell AAPL
-                print(f"Executing: Buy MSFT, Sell AAPL")
-                print(f"Using ${position_value:.2f} per position")
-
-                # FIXED: Get current prices instead of using hardcoded values
-                aapl_price = self.get_current_price('AAPL')
-                msft_price = self.get_current_price('MSFT')
-
-                if not aapl_price or not msft_price:
-                    print("Error: Could not fetch current prices. Aborting trade.")
-                    return orders
-
-                # Sanity check: prices should be reasonable
-                if aapl_price < 50 or aapl_price > 500:
-                    print(f"Warning: AAPL price ${aapl_price:.2f} seems unusual. Aborting trade.")
-                    return orders
-                if msft_price < 100 or msft_price > 1000:
-                    print(f"Warning: MSFT price ${msft_price:.2f} seems unusual. Aborting trade.")
-                    return orders
-
-                # Calculate quantities based on ACTUAL current prices
-                aapl_qty = int(position_value / aapl_price)
-                msft_qty = int(position_value / msft_price)
-
-                print(f"Current prices: AAPL=${aapl_price:.2f}, MSFT=${msft_price:.2f}")
-                print(f"Order quantities: AAPL={aapl_qty} shares, MSFT={msft_qty} shares")
-
-                # Place buy order for MSFT
-                order1 = self.place_order('MSFT', msft_qty, 'BUY', 'MARKET')
-                if order1:
-                    orders.append(order1)
-                    print(f"✓ Buy order placed for MSFT: {msft_qty} shares @ ${msft_price:.2f}")
-
-                # Place sell order for AAPL
-                order2 = self.place_order('AAPL', aapl_qty, 'SELL', 'MARKET')
-                if order2:
-                    orders.append(order2)
-                    print(f"✓ Sell order placed for AAPL: {aapl_qty} shares @ ${aapl_price:.2f}")
-        
         except Exception as e:
-            print(f"Error executing trade: {e}")
-        
+            logger.error("Error executing trade: %s", e)
+
         return orders
     
     async def _get_trade_history_async(self):
@@ -600,7 +567,7 @@ class TradingAPI:
             orders = orders_response.json() if hasattr(orders_response, 'json') else orders_response
             return orders if isinstance(orders, list) else []
         except Exception as e:
-            print(f"Error fetching trade history: {e}")
+            logger.error("Error fetching trade history: %s", e)
             return []
     
     def get_trade_history(self):
@@ -614,12 +581,12 @@ class TradingAPI:
             try:
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
-                    print("Warning: Cannot run async method in existing event loop")
+                    logger.warning("Cannot run async method in existing event loop")
                     return []
                 else:
                     return loop.run_until_complete(self._get_trade_history_async())
             except RuntimeError:
                 return asyncio.run(self._get_trade_history_async())
             except Exception as e:
-                print(f"Error fetching trade history: {e}")
+                logger.error("Error fetching trade history: %s", e)
                 return []

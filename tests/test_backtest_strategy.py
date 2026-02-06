@@ -169,6 +169,7 @@ class TestBacktestStrategy:
 
     def test_backtest_profitable_trade(self):
         """Test backtest with profitable trade"""
+        np.random.seed(0)  # deterministic fill/rejection simulation
         # Create favorable price movement
         dates = pd.date_range(start='2024-01-01', periods=3, freq='D')
         price_data = pd.DataFrame({
@@ -195,6 +196,7 @@ class TestBacktestStrategy:
 
     def test_backtest_transaction_costs_reduce_profit(self):
         """Test that transaction costs reduce profits"""
+        np.random.seed(0)  # deterministic fill/rejection simulation
         dates = pd.date_range(start='2024-01-01', periods=3, freq='D')
         price_data = pd.DataFrame({
             'AAPL': [150.0, 150.0, 152.0],
@@ -321,6 +323,66 @@ class TestTransactionCostModel:
         assert round_trip['total'] == (
             round_trip['entry']['total'] + round_trip['exit']['total']
         )
+
+
+class TestRiskManagerPreTradeCheck:
+    """Verify that the wired-in pre_trade_check gates trades correctly."""
+
+    def test_blocks_trade_exceeding_position_limit(self):
+        """pre_trade_check raises when proposed position exceeds the size limit."""
+        from risk_management import RiskManager, RiskLimits
+        from exceptions import PositionLimitExceededError
+
+        rm = RiskManager(
+            limits=RiskLimits(max_position_size=5),  # only 5 shares allowed
+            initial_capital=10000,
+        )
+
+        with pytest.raises(PositionLimitExceededError):
+            rm.pre_trade_check('AAPL', 10, 150.0)  # 10 shares > 5-share limit
+
+    def test_allows_trade_within_limits(self):
+        """pre_trade_check does not raise when the trade respects all limits."""
+        from risk_management import RiskManager, RiskLimits
+
+        rm = RiskManager(
+            limits=RiskLimits(
+                max_position_size=100,
+                max_position_value=50000,
+                max_total_exposure=200000,
+                max_single_position_pct=0.50,
+            ),
+            initial_capital=10000,
+        )
+
+        # Should return without raising
+        rm.pre_trade_check('AAPL', 6, 150.0, prices={'AAPL': 150.0})
+
+    def test_backtest_integrates_risk_manager_without_crash(self):
+        """backtest_strategy instantiates and exercises RiskManager end-to-end."""
+        np.random.seed(0)
+        dates = pd.date_range(start='2024-01-01', periods=3, freq='D')
+        price_data = pd.DataFrame({
+            'AAPL': [150.0, 150.0, 152.0],
+            'MSFT': [300.0, 300.0, 299.0],
+            'Price_Difference': [-150.0, -150.0, -147.0],
+        }, index=dates)
+
+        predictions = np.array([0.0, 0.8, 0.0])
+        actual_differences = price_data['Price_Difference'].values
+
+        results = backtest_strategy(
+            predictions,
+            actual_differences,
+            price_data,
+            threshold=0.5,
+            initial_capital=10000,
+        )
+
+        # Function completes without error — risk manager was constructed,
+        # pre_trade_check was called, positions were synced.
+        assert 'num_trades' in results
+        assert 'final_capital' in results
 
 
 if __name__ == '__main__':

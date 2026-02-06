@@ -6,8 +6,13 @@ from sklearn.preprocessing import StandardScaler
 import pickle
 from datetime import datetime, time
 from transaction_costs import TransactionCostModel
-from trading_execution import OrderExecutor, MarketImpact, BorrowCosts, MarginConfig
-from exceptions import OrderRejectedError, InsufficientFundsError, ShortNotAvailableError
+from trading_execution import OrderExecutor, MarketImpact, BorrowCosts, MarginConfig, OrderSide, OrderStatus
+from exceptions import OrderRejectedError, InsufficientFundsError, ShortNotAvailableError, RiskException
+from risk_management import RiskManager, RiskLimits
+from constants import (
+    feature_names, TICKER_LONG, TICKER_SHORT,
+    SIGNAL_BUY_LONG, SIGNAL_BUY_SHORT, SIGNAL_HOLD,
+)
 
 def load_processed_data(csv_file='processed_stock_data.csv'):
     """
@@ -20,7 +25,7 @@ def load_processed_data(csv_file='processed_stock_data.csv'):
     df = pd.read_csv(csv_file, index_col=0, parse_dates=True)
     
     # Get original price data
-    original_columns = ['AAPL', 'MSFT', 'Price_Difference']
+    original_columns = [TICKER_LONG, TICKER_SHORT, 'Price_Difference']
     if all(col in df.columns for col in original_columns):
         original_data = df[original_columns].copy()
     else:
@@ -67,35 +72,8 @@ def load_model_and_data(model_path='lstm_price_difference_model.h5',
     print(f"Loading data from {data_file}...")
     df, original_data = load_processed_data(data_file)
     
-    # Use the same feature selection logic as train_model.py
-    # Try normalized features first
-    feature_columns_normalized = [
-        'AAPL_normalized', 'MSFT_normalized', 'Price_Difference_normalized',
-        'AAPL_Volume_normalized', 'MSFT_Volume_normalized',
-        'AAPL_MA5_normalized', 'MSFT_MA5_normalized',
-        'AAPL_MA20_normalized', 'MSFT_MA20_normalized',
-        'AAPL_Volume_MA5_normalized', 'MSFT_Volume_MA5_normalized',
-        'AAPL_RSI_normalized', 'MSFT_RSI_normalized',
-        'AAPL_MACD_normalized', 'MSFT_MACD_normalized',
-        'AAPL_MACD_Signal_normalized', 'MSFT_MACD_Signal_normalized',
-        'AAPL_MACD_Histogram_normalized', 'MSFT_MACD_Histogram_normalized',
-        'AAPL_Reddit_Sentiment_normalized', 'MSFT_Reddit_Sentiment_normalized',
-        'AAPL_Options_Volume_normalized', 'MSFT_Options_Volume_normalized'
-    ]
-    
-    feature_columns_original = [
-        'AAPL', 'MSFT', 'Price_Difference',
-        'AAPL_Volume', 'MSFT_Volume',
-        'AAPL_MA5', 'MSFT_MA5',
-        'AAPL_MA20', 'MSFT_MA20',
-        'AAPL_Volume_MA5', 'MSFT_Volume_MA5',
-        'AAPL_RSI', 'MSFT_RSI',
-        'AAPL_MACD', 'MSFT_MACD',
-        'AAPL_MACD_Signal', 'MSFT_MACD_Signal',
-        'AAPL_MACD_Histogram', 'MSFT_MACD_Histogram',
-        'AAPL_Reddit_Sentiment', 'MSFT_Reddit_Sentiment',
-        'AAPL_Options_Volume', 'MSFT_Options_Volume'
-    ]
+    feature_columns_normalized = feature_names(normalized=True)
+    feature_columns_original   = feature_names(normalized=False)
     
     # Check what features are actually available
     available_normalized = [col for col in feature_columns_normalized if col in df.columns]
@@ -115,16 +93,10 @@ def load_model_and_data(model_path='lstm_price_difference_model.h5',
     else:
         # Fallback to basic features if new ones aren't available
         print("Warning: Advanced features not found. Using basic features only.")
-        basic_features = [
-            'AAPL_normalized', 'MSFT_normalized', 'Price_Difference_normalized',
-            'AAPL_Volume_normalized', 'MSFT_Volume_normalized',
-            'AAPL_MA5_normalized', 'MSFT_MA5_normalized',
-            'AAPL_MA20_normalized', 'MSFT_MA20_normalized',
-            'AAPL_Volume_MA5_normalized', 'MSFT_Volume_MA5_normalized'
-        ]
+        basic_features = feature_names(basic_only=True)
         feature_columns = [col for col in basic_features if col in df.columns]
         if not feature_columns:
-            feature_columns = ['AAPL', 'MSFT', 'Price_Difference', 'AAPL_Volume', 'MSFT_Volume']
+            feature_columns = feature_names(normalized=False)[:5]
             scaler = StandardScaler()
             data = scaler.fit_transform(df[feature_columns])
         else:
@@ -231,11 +203,11 @@ def generate_trading_signals(predictions, threshold=0.5):
     
     for pred in predictions:
         if pred > threshold:
-            signals.append('Buy AAPL, Sell MSFT')
+            signals.append(SIGNAL_BUY_LONG)
         elif pred < -threshold:
-            signals.append('Buy MSFT, Sell AAPL')
+            signals.append(SIGNAL_BUY_SHORT)
         else:
-            signals.append('Hold')
+            signals.append(SIGNAL_HOLD)
     
     return signals
 
@@ -302,6 +274,19 @@ def backtest_strategy(predictions, actual_differences, price_data, threshold=0.5
     )
     print(f"  Order execution: Market hours, shortable checks, partial fills enabled")
 
+    # Initialize risk manager for pre-trade checks
+    risk_limits = RiskLimits(
+        max_position_size=1000,
+        max_position_value=initial_capital * 0.5,
+        max_total_exposure=initial_capital * 2.0,
+        max_single_position_pct=0.15,
+        max_drawdown_pct=max_drawdown,
+        critical_drawdown_pct=max_drawdown * 2,
+    )
+    risk_manager = RiskManager(limits=risk_limits, initial_capital=initial_capital)
+    print(f"  Risk manager: max position ${risk_limits.max_position_value:,.0f}, "
+          f"max drawdown {risk_limits.max_drawdown_pct*100:.1f}%")
+
     capital = initial_capital
     positions = []  # Track all positions
     trades = []  # Track whether trades were executed
@@ -350,12 +335,13 @@ def backtest_strategy(predictions, actual_differences, price_data, threshold=0.5
 
                 capital -= abs(loss)  # FIXED: Subtract loss from capital
                 active_positions.remove(pos)
-                
+                risk_manager.remove_position(symbol)
+
                 print(f"  Stop-loss triggered for {symbol} at ${current_price:.2f} (entry: ${entry_price:.2f})")
         
         signal = signals[i]
-        aapl_price = price_data['AAPL'].iloc[i]
-        msft_price = price_data['MSFT'].iloc[i]
+        aapl_price = price_data[TICKER_LONG].iloc[i]
+        msft_price = price_data[TICKER_SHORT].iloc[i]
         actual_diff = actual_differences[i]
         
         trade_result = {
@@ -375,9 +361,9 @@ def backtest_strategy(predictions, actual_differences, price_data, threshold=0.5
             # Execute trade (only if not paused)
             position_size = capital * 0.1  # Use 10% of capital per trade
 
-            if signal == 'Buy AAPL, Sell MSFT':
+            if signal == SIGNAL_BUY_LONG:
                 # Betting difference will increase
-                # Enter: long AAPL, short MSFT
+                # Enter: long TICKER_LONG, short TICKER_SHORT
                 diff_change = actual_diff - prev_diff
 
                 # Calculate quantity for each leg
@@ -392,36 +378,37 @@ def backtest_strategy(predictions, actual_differences, price_data, threshold=0.5
                 profit = 0.0
 
                 try:
-                    # Execute buy AAPL order
+                    # Pre-trade risk checks
+                    current_prices = {TICKER_LONG: aapl_price, TICKER_SHORT: msft_price}
+                    risk_manager.pre_trade_check(TICKER_LONG, aapl_qty, aapl_price, prices=current_prices)
+                    risk_manager.pre_trade_check(TICKER_SHORT, -msft_qty, msft_price, prices=current_prices)
+
+                    # Execute buy TICKER_LONG order
                     aapl_result = order_executor.execute_order(
-                        symbol='AAPL',
+                        symbol=TICKER_LONG,
                         quantity=aapl_qty,
-                        side='BUY',
+                        side=OrderSide.BUY,
                         price=aapl_price,
-                        order_type='MARKET',
-                        available_balance=capital,
+                        available_capital=capital,
                         timestamp=trade_time,
-                        average_daily_volume=1000000,  # Mock ADV
-                        spread=0.01,  # Mock 1 cent spread
-                        is_shortable=True  # AAPL typically shortable
+                        average_daily_volume=1000000,
+                        spread=0.01,
                     )
 
-                    # Execute sell MSFT order (short)
+                    # Execute short TICKER_SHORT order
                     msft_result = order_executor.execute_order(
-                        symbol='MSFT',
+                        symbol=TICKER_SHORT,
                         quantity=msft_qty,
-                        side='SELL',
+                        side=OrderSide.SHORT,
                         price=msft_price,
-                        order_type='MARKET',
-                        available_balance=capital,
+                        available_capital=capital,
                         timestamp=trade_time,
-                        average_daily_volume=1000000,  # Mock ADV
-                        spread=0.01,  # Mock 1 cent spread
-                        is_shortable=True  # MSFT typically shortable
+                        average_daily_volume=1000000,
+                        spread=0.01,
                     )
 
                     # Both orders executed successfully
-                    if aapl_result['status'] == 'FILLED' and msft_result['status'] == 'FILLED':
+                    if aapl_result['status'] == OrderStatus.FILLED and msft_result['status'] == OrderStatus.FILLED:
                         trade_executed = True
 
                         # Get actual filled quantities and prices
@@ -441,18 +428,22 @@ def backtest_strategy(predictions, actual_differences, price_data, threshold=0.5
                         # Track positions
                         if aapl_filled_qty > 0:
                             active_positions.append({
-                                'symbol': 'AAPL',
+                                'symbol': TICKER_LONG,
                                 'entry_price': aapl_avg_price,
                                 'quantity': aapl_filled_qty,
                                 'is_long': True
                             })
                         if msft_filled_qty > 0:
                             active_positions.append({
-                                'symbol': 'MSFT',
+                                'symbol': TICKER_SHORT,
                                 'entry_price': msft_avg_price,
                                 'quantity': msft_filled_qty,
                                 'is_long': False
                             })
+
+                        # Sync risk manager position state
+                        risk_manager.add_position(TICKER_LONG, aapl_filled_qty, aapl_avg_price)
+                        risk_manager.add_position(TICKER_SHORT, -msft_filled_qty, msft_avg_price)
                     elif aapl_result['status'] == 'PARTIAL' or msft_result['status'] == 'PARTIAL':
                         # Handle partial fills
                         trade_executed = True
@@ -464,9 +455,13 @@ def backtest_strategy(predictions, actual_differences, price_data, threshold=0.5
                         gross_profit = position_size * fill_rate * (diff_change / (aapl_price + msft_price))
                         profit = gross_profit - trade_costs
 
-                        print(f"  Partial fill: AAPL {aapl_result['filled_quantity']}/{aapl_qty}, "
-                              f"MSFT {msft_result['filled_quantity']}/{msft_qty}")
+                        print(f"  Partial fill: {TICKER_LONG} {aapl_result['filled_quantity']}/{aapl_qty}, "
+                              f"{TICKER_SHORT} {msft_result['filled_quantity']}/{msft_qty}")
 
+                except RiskException as e:
+                    print(f"  Trade blocked by risk check: {e}")
+                    trade_executed = False
+                    profit = 0.0
                 except (OrderRejectedError, InsufficientFundsError, ShortNotAvailableError) as e:
                     # Order rejected - no trade executed
                     print(f"  Order rejected for {signal}: {e}")
@@ -486,9 +481,9 @@ def backtest_strategy(predictions, actual_differences, price_data, threshold=0.5
                 else:
                     trades.append(False)
                 
-            elif signal == 'Buy MSFT, Sell AAPL':
+            elif signal == SIGNAL_BUY_SHORT:
                 # Betting difference will decrease
-                # Enter: long MSFT, short AAPL
+                # Enter: long TICKER_SHORT, short TICKER_LONG
                 diff_change = prev_diff - actual_diff
 
                 # Calculate quantity for each leg
@@ -503,36 +498,37 @@ def backtest_strategy(predictions, actual_differences, price_data, threshold=0.5
                 profit = 0.0
 
                 try:
-                    # Execute buy MSFT order
+                    # Pre-trade risk checks
+                    current_prices = {TICKER_LONG: aapl_price, TICKER_SHORT: msft_price}
+                    risk_manager.pre_trade_check(TICKER_SHORT, msft_qty, msft_price, prices=current_prices)
+                    risk_manager.pre_trade_check(TICKER_LONG, -aapl_qty, aapl_price, prices=current_prices)
+
+                    # Execute buy TICKER_SHORT order
                     msft_result = order_executor.execute_order(
-                        symbol='MSFT',
+                        symbol=TICKER_SHORT,
                         quantity=msft_qty,
-                        side='BUY',
+                        side=OrderSide.BUY,
                         price=msft_price,
-                        order_type='MARKET',
-                        available_balance=capital,
+                        available_capital=capital,
                         timestamp=trade_time,
-                        average_daily_volume=1000000,  # Mock ADV
-                        spread=0.01,  # Mock 1 cent spread
-                        is_shortable=True  # MSFT typically shortable
+                        average_daily_volume=1000000,
+                        spread=0.01,
                     )
 
-                    # Execute sell AAPL order (short)
+                    # Execute short TICKER_LONG order
                     aapl_result = order_executor.execute_order(
-                        symbol='AAPL',
+                        symbol=TICKER_LONG,
                         quantity=aapl_qty,
-                        side='SELL',
+                        side=OrderSide.SHORT,
                         price=aapl_price,
-                        order_type='MARKET',
-                        available_balance=capital,
+                        available_capital=capital,
                         timestamp=trade_time,
-                        average_daily_volume=1000000,  # Mock ADV
-                        spread=0.01,  # Mock 1 cent spread
-                        is_shortable=True  # AAPL typically shortable
+                        average_daily_volume=1000000,
+                        spread=0.01,
                     )
 
                     # Both orders executed successfully
-                    if msft_result['status'] == 'FILLED' and aapl_result['status'] == 'FILLED':
+                    if msft_result['status'] == OrderStatus.FILLED and aapl_result['status'] == OrderStatus.FILLED:
                         trade_executed = True
 
                         # Get actual filled quantities and prices
@@ -552,18 +548,22 @@ def backtest_strategy(predictions, actual_differences, price_data, threshold=0.5
                         # Track positions
                         if msft_filled_qty > 0:
                             active_positions.append({
-                                'symbol': 'MSFT',
+                                'symbol': TICKER_SHORT,
                                 'entry_price': msft_avg_price,
                                 'quantity': msft_filled_qty,
                                 'is_long': True
                             })
                         if aapl_filled_qty > 0:
                             active_positions.append({
-                                'symbol': 'AAPL',
+                                'symbol': TICKER_LONG,
                                 'entry_price': aapl_avg_price,
                                 'quantity': aapl_filled_qty,
                                 'is_long': False
                             })
+
+                        # Sync risk manager position state
+                        risk_manager.add_position(TICKER_SHORT, msft_filled_qty, msft_avg_price)
+                        risk_manager.add_position(TICKER_LONG, -aapl_filled_qty, aapl_avg_price)
                     elif msft_result['status'] == 'PARTIAL' or aapl_result['status'] == 'PARTIAL':
                         # Handle partial fills
                         trade_executed = True
@@ -575,9 +575,13 @@ def backtest_strategy(predictions, actual_differences, price_data, threshold=0.5
                         gross_profit = position_size * fill_rate * (diff_change / (msft_price + aapl_price))
                         profit = gross_profit - trade_costs
 
-                        print(f"  Partial fill: MSFT {msft_result['filled_quantity']}/{msft_qty}, "
-                              f"AAPL {aapl_result['filled_quantity']}/{aapl_qty}")
+                        print(f"  Partial fill: {TICKER_SHORT} {msft_result['filled_quantity']}/{msft_qty}, "
+                              f"{TICKER_LONG} {aapl_result['filled_quantity']}/{aapl_qty}")
 
+                except RiskException as e:
+                    print(f"  Trade blocked by risk check: {e}")
+                    trade_executed = False
+                    profit = 0.0
                 except (OrderRejectedError, InsufficientFundsError, ShortNotAvailableError) as e:
                     # Order rejected - no trade executed
                     print(f"  Order rejected for {signal}: {e}")
@@ -606,6 +610,7 @@ def backtest_strategy(predictions, actual_differences, price_data, threshold=0.5
         
         positions.append(trade_result)
         equity_curve.append(capital)
+        risk_manager.update_capital(capital)
         prev_diff = actual_diff  # Update for next iteration
     
     # Calculate metrics

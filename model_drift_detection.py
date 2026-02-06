@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from collections import deque
 from scipy import stats
+from logging_config import log_drift_alert
 
 logger = logging.getLogger(__name__)
 
@@ -495,10 +496,10 @@ class ModelDriftMonitor:
         # Check prediction drift
         all_alerts.extend(self.prediction_detector.check_drift())
 
-        # Log and store alerts
+        # Route and store alerts
         for alert in all_alerts:
-            logger.warning(f"DRIFT ALERT: {alert.message}")
             self.alert_history.append(alert)
+            log_drift_alert(alert.to_dict())
 
         return all_alerts
 

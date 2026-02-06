@@ -4,6 +4,78 @@ Centralized constants to avoid magic numbers throughout the codebase
 """
 
 # ============================================================================
+# Ticker Configuration
+# ============================================================================
+
+# The two symbols used for the pairs trade.  Change these to switch pairs.
+# After changing, re-run process_stock_data.py → train_model.py before
+# backtesting or live trading.
+TICKER_LONG  = 'AAPL'
+TICKER_SHORT = 'MSFT'
+
+# Trading signal strings — derived from tickers; do not edit directly.
+SIGNAL_BUY_LONG  = f'Buy {TICKER_LONG}, Sell {TICKER_SHORT}'
+SIGNAL_BUY_SHORT = f'Buy {TICKER_SHORT}, Sell {TICKER_LONG}'
+SIGNAL_HOLD      = 'Hold'
+
+# Per-symbol price-sanity ranges (min, max).  Used by trading_api as a
+# guard before executing orders.  Extend when adding new ticker pairs.
+PRICE_SANITY_RANGES = {
+    'AAPL': (50,   500),
+    'MSFT': (100, 1000),
+}
+
+# ---------------------------------------------------------------------------
+# Feature-column helpers
+# ---------------------------------------------------------------------------
+
+# Suffixes appended to each ticker to form feature column names.
+# Order must match the column order written by process_stock_data.
+_FEATURE_SUFFIXES = [
+    '',                   # base close price
+    '_Volume',
+    '_MA5',
+    '_MA20',
+    '_Volume_MA5',
+    '_RSI',
+    '_MACD',
+    '_MACD_Signal',
+    '_MACD_Histogram',
+    '_Reddit_Sentiment',
+    '_Options_Volume',
+]
+
+# The first N suffix groups present in the "basic" feature set (when the
+# full set of indicators is unavailable).
+_BASIC_SUFFIX_COUNT = 5
+
+
+def feature_names(ticker_long=None, ticker_short=None, normalized=True, basic_only=False):
+    """Return the ordered list of feature column names for the ticker pair.
+
+    Args:
+        ticker_long:  Long-leg ticker (default TICKER_LONG).
+        ticker_short: Short-leg ticker (default TICKER_SHORT).
+        normalized:   If True, append '_normalized' to every name.
+        basic_only:   If True, return only the first 5 feature groups
+                      (price, volume, MA5, MA20, volume MA5).
+
+    Returns:
+        List of column-name strings in the order expected by the models.
+    """
+    tl = ticker_long or TICKER_LONG
+    ts = ticker_short or TICKER_SHORT
+    sfx = '_normalized' if normalized else ''
+    suffixes = _FEATURE_SUFFIXES[:_BASIC_SUFFIX_COUNT] if basic_only else _FEATURE_SUFFIXES
+
+    cols = [f'{tl}{sfx}', f'{ts}{sfx}', f'Price_Difference{sfx}']
+    for s in suffixes[1:]:          # base price already covered above
+        cols.append(f'{tl}{s}{sfx}')
+        cols.append(f'{ts}{s}{sfx}')
+    return cols
+
+
+# ============================================================================
 # Machine Learning Constants
 # ============================================================================
 

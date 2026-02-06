@@ -593,6 +593,9 @@ class OrderExecutor:
         else:
             status = OrderStatus.REJECTED
 
+        # Total cost is the market impact across all filled shares
+        total_cost = abs(execution_price - price) * filled_qty
+
         result = {
             'status': status,
             'symbol': symbol,
@@ -602,7 +605,9 @@ class OrderExecutor:
             'unfilled_quantity': unfilled_qty,
             'quoted_price': price,
             'execution_price': execution_price,
+            'average_price': execution_price,
             'market_impact': execution_price - price,
+            'total_cost': total_cost,
             'timestamp': timestamp
         }
 

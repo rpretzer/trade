@@ -426,8 +426,13 @@ class RiskManager:
         new_qty = current_qty + quantity
         new_position_value = abs(new_qty * price)
 
-        # Calculate total portfolio value
-        total_value = self.get_total_exposure(prices) - abs(current_qty * price) + new_position_value
+        # Total portfolio value = uninvested cash + all position values.
+        # current_capital tracks this correctly; fall back to exposure-only
+        # when it hasn't been initialised yet.
+        if self.current_capital > 0:
+            total_value = self.current_capital
+        else:
+            total_value = self.get_total_exposure(prices) - abs(current_qty * price) + new_position_value
 
         if total_value == 0:
             return

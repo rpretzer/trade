@@ -157,7 +157,7 @@ def _setup_readline_completer():
     try:
         import readline
 
-        _completions = [str(i) for i in range(1, 17)] + list(COMMANDS.keys())
+        _completions = [str(i) for i in range(1, 17)] + list(COMMANDS.keys()) + ['deps', 'models']
 
         def _completer(text, state):
             matches = [c for c in _completions if c.startswith(text)]
@@ -167,6 +167,109 @@ def _setup_readline_completer():
         readline.parse_and_bind("tab: complete")
     except ImportError:
         pass  # readline not available on all platforms
+
+
+# ── Optional-dependency profiles ─────────────────────────────────────
+# Each entry describes one installable feature set.
+
+_OPTIONAL_PROFILES = [
+    {
+        'name':         'LSTM Training',
+        'description':  'Train LSTM neural-network models',
+        'req_file':     'requirements-lstm.txt',
+        'modules':      ['tensorflow'],
+        'needed_by':    ['Train Model (2)', 'Full Pipeline (3)'],
+    },
+    {
+        'name':         'Live Trading',
+        'description':  'Connect to Schwab for live / paper trading',
+        'req_file':     'requirements-live.txt',
+        'modules':      ['schwab'],
+        'needed_by':    ['Live Trading (5)'],
+    },
+    {
+        'name':         'Advanced Analysis',
+        'description':  'Cointegration tests & market-hours calendar',
+        'req_file':     'requirements-advanced.txt',
+        'modules':      ['statsmodels', 'pandas_market_calendars'],
+        'needed_by':    ['Cointegration Analysis (8)'],
+    },
+]
+
+
+def _profile_installed(profile):
+    """Return True when every module in the profile is importable."""
+    import importlib.util
+    return all(importlib.util.find_spec(m) is not None for m in profile['modules'])
+
+
+def check_dependencies():
+    """
+    Interactive dependency check.  Shows which optional profiles are
+    available and which are missing, then offers to install each missing
+    profile one at a time.
+    """
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    installed   = []
+    missing     = []
+    for p in _OPTIONAL_PROFILES:
+        (installed if _profile_installed(p) else missing).append(p)
+
+    # ── display ───────────────────────────────────────────────────────
+    print(f"\n{Colors.HEADER}{Colors.BOLD}{'='*70}")
+    print("  OPTIONAL DEPENDENCIES")
+    print(f"{'='*70}{Colors.ENDC}\n")
+
+    print(f"  {Colors.BOLD}{Colors.OKGREEN}Installed:{Colors.ENDC}")
+    if installed:
+        for p in installed:
+            print(f"    {Colors.OKGREEN}✓{Colors.ENDC}  {Colors.BOLD}{p['name']}{Colors.ENDC}"
+                  f"  –  {p['description']}")
+    else:
+        print(f"    {Colors.OKCYAN}(none){Colors.ENDC}")
+
+    print(f"\n  {Colors.BOLD}{Colors.WARNING}Not installed:{Colors.ENDC}")
+    if missing:
+        for p in missing:
+            needed = ', '.join(p['needed_by'])
+            print(f"    {Colors.WARNING}✗{Colors.ENDC}  {Colors.BOLD}{p['name']}{Colors.ENDC}"
+                  f"  –  {p['description']}")
+            print(f"        Needed by: {needed}")
+            print(f"        Manual:    pip install -r {p['req_file']}")
+    else:
+        print(f"    {Colors.OKGREEN}All optional packages are installed.{Colors.ENDC}")
+
+    print(f"\n{Colors.OKCYAN}{'='*70}{Colors.ENDC}")
+
+    # ── per-profile install prompts ───────────────────────────────────
+    if not missing:
+        return
+
+    for p in missing:
+        choice = get_user_input(
+            f"\n  Install {Colors.BOLD}{p['name']}{Colors.ENDC}"
+            f"  ({p['req_file']})? (y/n)",
+            "n"
+        )
+        if choice and choice.lower() == 'y':
+            req_path = os.path.join(script_dir, p['req_file'])
+            if not os.path.exists(req_path):
+                print_error(f"  {p['req_file']} not found in {script_dir}")
+                continue
+
+            print_info(f"  Installing {p['name']}…")
+            result = subprocess.run(
+                [sys.executable, '-m', 'pip', 'install', '-r', req_path],
+                capture_output=False
+            )
+            if result.returncode == 0:
+                print_success(f"  {p['name']} installed successfully.")
+            else:
+                print_error(f"  Installation of {p['name']} failed (exit code {result.returncode}).")
+                print_info(f"  You can retry manually:  pip install -r {p['req_file']}")
+
+    print()
 
 
 # ── First-time tutorial ──────────────────────────────────────────────────
@@ -190,6 +293,9 @@ def run_tutorial():
 
     print(f"  {Colors.BOLD}It looks like this is your first time running the system.{Colors.ENDC}")
     print(f"  No data, model, or backtest results were found.\n")
+
+    # Let the user install any missing optional packages before we suggest steps
+    check_dependencies()
 
     print(f"  {Colors.BOLD}The recommended path is:{Colors.ENDC}")
     print(f"    {Colors.OKGREEN}1.{Colors.ENDC} Process Data   – downloads & engineers features")
@@ -445,7 +551,6 @@ def process_data():
         # Get last trading day for the selected market
         try:
             # Import the function from process_stock_data
-            import sys
             import importlib.util
             spec = importlib.util.spec_from_file_location("process_stock_data", "process_stock_data.py")
             process_module = importlib.util.module_from_spec(spec)
@@ -814,13 +919,11 @@ def setup_live_trading():
                 cred_manager.save_credentials(app_key, app_secret)
                 print_success("App credentials encrypted and saved securely")
             else:
-                print_error("Failed to install cryptography. Credentials will be stored in plain text (INSECURE)")
-                print_warning("⚠️  SECURITY WARNING: Storing credentials in plain text is not recommended!")
-                # Fallback to plain text (with warning)
-                with open(config_file, 'w') as f:
-                    f.write(f"APP_KEY={app_key}\n")
-                    f.write(f"APP_SECRET={app_secret}\n")
-                print_success(f"App credentials saved to {config_file} (UNENCRYPTED)")
+                print_error("Failed to install cryptography package.")
+                print_error("Credentials cannot be stored securely — aborting setup.")
+                print_info("Run:  pip install cryptography")
+                print_info("Then re-run live trading setup.")
+                return False
         except Exception as e:
             print_error(f"Error: {e}")
             return False
@@ -987,90 +1090,22 @@ def live_trade():
             use_paper = True
     
     try:
-        # Initialize trading API
-        api = TradingAPI(paper_trading=use_paper)
-        api.connect()
-        
-        # Get account balance
-        balance_info = api.get_account_balance()
-        if balance_info:
-            if isinstance(balance_info, dict):
-                balance = balance_info.get('available_funds', balance_info.get('total_value', 0))
-                paper_status = "📝 (Paper Trading)" if balance_info.get('paper_trading', True) else "💰 (Live Trading)"
-                print_success(f"Account balance: ${balance:,.2f} {paper_status}")
-            else:
-                print_success(f"Account balance: ${balance_info:,.2f}")
-        else:
-            print_warning("Could not fetch account balance")
-        
-        # Get latest signal using Python 3.12 venv
-        print_info("\nFetching latest trading signal...")
-        try:
-            python_cmd = get_python_cmd()
-            # Use subprocess to run get_latest_signal in the venv
-            import subprocess
-            import json
-            
-            # Create a simple script to get the signal
-            signal_script = """
-import sys
-sys.path.insert(0, '.')
-try:
-    from live_trading import get_latest_signal
-    signal = get_latest_signal(
-        model_path='lstm_price_difference_model.h5',
-        data_file='processed_stock_data.csv',
-        threshold=0.5
-    )
-    if signal:
-        print(signal)
-    else:
-        print('Hold')
-except Exception as e:
-    print(f'ERROR: {e}', file=sys.stderr)
-    sys.exit(1)
-"""
-            result = subprocess.run(
-                [python_cmd, '-c', signal_script],
-                capture_output=True,
-                text=True,
-                cwd=os.path.dirname(os.path.abspath(__file__))
-            )
-            
-            if result.returncode == 0:
-                signal = result.stdout.strip()
-                if signal and signal != 'ERROR':
-                    print_success(f"Latest signal: {signal}")
-                    
-                    # Execute trades based on signal
-                    if signal == 'Buy AAPL, Sell MSFT':
-                        print_info("\nExecuting trades:")
-                        api.place_order('AAPL', 10, 'BUY')
-                        api.place_order('MSFT', 10, 'SELL')
-                    elif signal == 'Buy MSFT, Sell AAPL':
-                        print_info("\nExecuting trades:")
-                        api.place_order('MSFT', 10, 'BUY')
-                        api.place_order('AAPL', 10, 'SELL')
-                    else:
-                        print_info(f"No action taken (signal: {signal})")
-                else:
-                    print_warning("Could not get valid trading signal")
-            else:
-                print_error(f"Error getting trading signal: {result.stderr}")
-                print_info("Make sure the model and data files are available")
-                return False
-                
-        except Exception as e:
-            print_error(f"Error getting trading signal: {e}")
-            print_info("Make sure the model and data files are available")
-            import traceback
-            traceback.print_exc()
-            return False
-        
+        from live_trading import run_trading_loop
+    except ImportError as e:
+        print_error(f"Could not import trading loop: {e}")
+        print_info("Make sure all dependencies are installed: python main.py deps")
+        return False
+
+    print_info(f"\nStarting continuous trading loop...")
+    print_info(f"  Mode:     {'Paper Trading' if use_paper else 'LIVE TRADING'}")
+    print_info(f"  Interval: 5 minutes between prediction cycles")
+    print_info(f"  Stop:     Ctrl+C for graceful shutdown\n")
+
+    try:
+        run_trading_loop(paper_trading=use_paper)
         return True
-        
     except Exception as e:
-        print_error(f"Error in live trading: {e}")
+        print_error(f"Trading loop error: {e}")
         import traceback
         traceback.print_exc()
         return False
@@ -1195,7 +1230,8 @@ def get_selected_stocks():
         except Exception:
             pass
     # Default stocks
-    return 'AAPL', 'MSFT'
+    from constants import TICKER_LONG, TICKER_SHORT
+    return TICKER_LONG, TICKER_SHORT
 
 @safe_execute
 def select_stocks():
@@ -1337,10 +1373,10 @@ def analyze_correlation():
     if not stock_input:
         stock_input = default_stocks
     
-    stock_list = [s.strip().upper() for s in stock_input.split(",") if s.strip()]
+    stock_list = list(dict.fromkeys([s.strip().upper() for s in stock_input.split(",") if s.strip()]))
     
     if len(stock_list) < 2:
-        print_error("Please enter at least 2 stock tickers!")
+        print_error("Please enter at least 2 unique stock tickers!")
         return False
     
     print_info(f"Analyzing correlations for: {', '.join(stock_list)}")
@@ -1380,6 +1416,10 @@ def analyze_correlation():
             for j in range(i + 1, len(corr_matrix.columns)):
                 stock1 = corr_matrix.columns[i]
                 stock2 = corr_matrix.columns[j]
+                
+                if stock1 == stock2:
+                    continue
+                    
                 correlation = corr_matrix.iloc[i, j]
                 if not pd.isna(correlation) and correlation > 0.8:
                     suggested_pairs.append((stock1, stock2, correlation))
@@ -1424,10 +1464,10 @@ def analyze_cointegration():
     if not stock_input:
         stock_input = default_stocks
     
-    stock_list = [s.strip().upper() for s in stock_input.split(",") if s.strip()]
+    stock_list = list(dict.fromkeys([s.strip().upper() for s in stock_input.split(",") if s.strip()]))
     
     if len(stock_list) < 2:
-        print_error("Please enter at least 2 stock tickers!")
+        print_error("Please enter at least 2 unique stock tickers!")
         return False
     
     print_info(f"Analyzing cointegration for: {', '.join(stock_list)}")
@@ -1467,6 +1507,9 @@ def analyze_cointegration():
                 stock1 = close_data.columns[i]
                 stock2 = close_data.columns[j]
                 
+                if stock1 == stock2:
+                    continue
+                
                 # Get the two series
                 series1 = close_data[stock1].dropna()
                 series2 = close_data[stock2].dropna()
@@ -1504,6 +1547,55 @@ def analyze_cointegration():
         import traceback
         traceback.print_exc()
         return False
+
+@safe_execute
+def show_models():
+    """List all registered model versions and their status."""
+    print(f"\n{Colors.HEADER}{Colors.BOLD}📦 MODEL REGISTRY{Colors.ENDC}")
+    print(f"{Colors.OKCYAN}{'='*70}{Colors.ENDC}\n")
+
+    try:
+        from model_management import ModelRegistry, ModelStatus
+    except ImportError as e:
+        print_error(f"Could not import model_management: {e}")
+        return False
+
+    registry = ModelRegistry()
+    models = registry.list_models()
+
+    if not models:
+        print_info("No models registered yet. Run 'Train Model' (option 2) to register one.")
+        return True
+
+    _status_color = {
+        'PRODUCTION': Colors.OKGREEN,
+        'CANARY':     Colors.OKBLUE,
+        'SHADOW':     Colors.OKCYAN,
+        'TESTING':    Colors.WARNING,
+        'TRAINING':   Colors.WARNING,
+        'VALIDATING': Colors.WARNING,
+        'DEPRECATED': Colors.FAIL,
+        'ARCHIVED':   Colors.FAIL,
+    }
+
+    print(f"  {Colors.BOLD}{'Version':<12} {'Type':<10} {'Status':<14} {'Registered':<22} {'Val MAE':<12} {'Traffic'}{Colors.ENDC}")
+    print(f"  {'─'*12} {'─'*10} {'─'*14} {'─'*22} {'─'*12} {'─'*8}")
+
+    for m in sorted(models, key=lambda x: x.created_at, reverse=True):
+        status_str = m.status.value
+        colour = _status_color.get(status_str, '')
+        val_mae = m.validation_metrics.get('mae', '—') if m.validation_metrics else '—'
+        if isinstance(val_mae, float):
+            val_mae = f"{val_mae:.6f}"
+        traffic = f"{m.traffic_percentage*100:.0f}%" if m.traffic_percentage > 0 else '—'
+        created = m.created_at[:19] if m.created_at else '—'
+        print(f"  {m.version:<12} {m.model_type:<10} "
+              f"{colour}{status_str:<14}{Colors.ENDC} "
+              f"{created:<22} {str(val_mae):<12} {traffic}")
+
+    print()
+    return True
+
 
 def show_menu():
     """Display the main menu."""
@@ -1660,7 +1752,9 @@ def show_help(option=None):
     print("    python main.py pipeline     – option 3")
     print("    python main.py backtest     – option 4")
     print("    python main.py dashboard    – option 9")
-    print("    python main.py status       – option 14\n")
+    print("    python main.py status       – option 14")
+    print("    python main.py deps         – check & install optional deps")
+    print("    python main.py models       – list registered model versions\n")
 
     print(f"  {Colors.BOLD}Flags:{Colors.ENDC}")
     print("    --no-color   disable coloured output (or set NO_COLOR env var)")
@@ -1725,6 +1819,14 @@ def main():
             show_help()
             return
 
+        if cmd == 'deps':
+            check_dependencies()
+            return
+
+        if cmd == 'models':
+            show_models()
+            return
+
         if cmd in COMMANDS:
             choice, _ = COMMANDS[cmd]
             print_header()
@@ -1738,6 +1840,8 @@ def main():
         print(f"\n  Available commands:\n")
         for name, (_, desc) in sorted(COMMANDS.items()):
             print(f"    {Colors.BOLD}{name:12s}{Colors.ENDC} {desc}")
+        print(f"    {Colors.BOLD}{'deps':12s}{Colors.ENDC} Check & install optional deps")
+        print(f"    {Colors.BOLD}{'models':12s}{Colors.ENDC} List registered model versions")
         print(f"\n  Or run without arguments for the interactive menu.\n")
         return
 

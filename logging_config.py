@@ -353,6 +353,55 @@ def log_risk_event(logger: logging.Logger, event_data: Dict[str, Any]):
     )
 
 
+def log_drift_alert(alert_data: Dict[str, Any]):
+    """
+    Log a drift alert to the dedicated alerts logger.
+
+    HIGH and CRITICAL alerts are written to logs/alerts.log so they can be
+    monitored independently of the general application log.
+
+    Args:
+        alert_data: Dict from DriftAlert.to_dict()
+    """
+    alerts_logger = logging.getLogger('drift_alerts')
+
+    # Ensure the dedicated alerts handler is set up (idempotent)
+    if not alerts_logger.handlers:
+        global _logging_config
+        if _logging_config is None:
+            init_logging()
+        log_dir = Path(_logging_config.log_dir) if _logging_config else Path('logs')
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        handler = logging.handlers.RotatingFileHandler(
+            log_dir / 'alerts.log',
+            maxBytes=5 * 1024 * 1024,
+            backupCount=90
+        )
+        handler.setFormatter(StructuredFormatter())
+        alerts_logger.addHandler(handler)
+        alerts_logger.setLevel(logging.WARNING)
+        alerts_logger.propagate = True  # Also reaches the root logger
+
+    severity = alert_data.get('severity', 'NONE')
+    message = alert_data.get('message', 'Drift detected')
+
+    level = logging.WARNING
+    if severity in ('HIGH', 'CRITICAL'):
+        level = logging.ERROR
+
+    alerts_logger.log(
+        level,
+        f"[{severity}] {message}",
+        extra={'extra_fields': {'drift_alert': alert_data}}
+    )
+
+    # Dispatch HIGH / CRITICAL alerts to external sinks (webhook / stderr)
+    if severity in ('HIGH', 'CRITICAL'):
+        from alert_dispatch import dispatch_alert
+        dispatch_alert(alert_data)
+
+
 # Example usage
 if __name__ == '__main__':
     # Initialize logging

@@ -9,8 +9,8 @@ Complete guide to deploying the Stock Arbitrage Model to staging and production 
 ### System Requirements
 
 - **OS**: Linux (Ubuntu 20.04+) or macOS
-- **Python**: 3.12 (required for TensorFlow 2.15)
-- **Memory**: 4GB RAM minimum, 8GB recommended
+- **Python**: 3.10+ (3.12 recommended for TensorFlow 2.15)
+- **Memory**: 4 GB RAM minimum, 8 GB recommended
 - **Disk**: 10GB free space
 - **Network**: Stable internet connection for API access
 
@@ -56,14 +56,22 @@ python --version  # Should show Python 3.12.x
 # Upgrade pip
 pip install --upgrade pip
 
-# Install production dependencies
+# Install core dependencies
 pip install -r requirements.txt
 
 # Install development dependencies (optional)
 pip install -r requirements-dev.txt
 ```
 
-**Note**: If you get TensorFlow import errors, ensure Python 3.12 is being used (not 3.14).
+Optional feature packs live in separate files.  The CLI can install them
+for you interactively (`python main.py deps`), or install manually:
+
+```bash
+pip install -r requirements-lstm.txt       # LSTM training (needs Python 3.11/3.12)
+pip install -r requirements-live.txt       # live Schwab trading
+pip install -r requirements-advanced.txt   # cointegration, market calendars
+pip install -r requirements-full.txt       # everything above
+```
 
 ### 4. Configure Credentials
 
@@ -184,14 +192,11 @@ Add:
 
 ### 2. Run in Paper Trading Mode
 
-Before live trading, run in read-only mode to validate:
+Paper-trading is **on by default** (`paper_trading=True` in
+`trading_api.py`).  No environment variable is needed — just run:
 
 ```bash
-# Set environment variable to disable live trading
-export TRADING_MODE=paper
-
-# Run live trading script (won't execute real trades)
-python live_trading.py
+python main.py live       # simulates trades; no real orders placed
 ```
 
 **Monitor for**:
@@ -228,10 +233,10 @@ Before deploying to production:
 
 - [ ] Backtest shows positive returns over 6+ months
 - [ ] Paper trading ran successfully for 1+ week
-- [ ] All 198 tests passing (`pytest tests/ -v`)
+- [ ] All 287 tests passing (`pytest tests/ -v`)
 - [ ] Audit logs verified (no tampering detected)
 - [ ] Risk limits configured appropriately
-- [ ] Alert email/SMS configured
+- [ ] Drift alerts reviewed in `logs/alerts.log`
 - [ ] Backup plan in place
 
 ### 1. Set Capital Limits
@@ -252,27 +257,23 @@ RiskLimits(
 
 ### 2. Enable Live Trading
 
+Live trading is enabled by passing `paper_trading=False` when
+instantiating the trading client.  This is done through menu option 5
+(`python main.py live`) after Schwab credentials have been configured
+via option 6 (`python main.py setup`).  The system will refuse to place
+real orders if `schwab-py` is not installed or credentials are missing.
+
+### 3. Start the Live Trading Loop
+
+The system runs a continuous trading loop (not cron-based).  It sleeps
+automatically outside market hours and checks for signals every 5 minutes:
+
 ```bash
-# Remove paper trading mode
-unset TRADING_MODE
-
-# Or set explicitly
-export TRADING_MODE=live
+python main.py live       # starts continuous loop; Ctrl-C for graceful shutdown
 ```
 
-### 3. Set Up Live Trading Cron
-
-```bash
-crontab -e
-```
-
-Add:
-
-```cron
-# Run live trading every 5 minutes during market hours
-# 9:30 AM - 4:00 PM Eastern, Monday-Friday
-*/5 9-16 * * 1-5 cd /path/to/stock_arbitrage_model && python live_trading.py >> logs/cron_trading.log 2>&1
-```
+The loop handles market-hours detection, position persistence (JSON file),
+and a circuit breaker that halts after 5 consecutive errors.
 
 ### 4. Monitor Closely
 
@@ -294,8 +295,8 @@ echo "\n=== System Health ==="
 # Check for errors
 grep -i error logs/*.log | tail -10
 
-# Check drift alerts
-grep -i "drift alert" logs/*.log | tail -5
+# Check drift alerts (structured JSON)
+tail -5 logs/alerts.log 2>/dev/null || echo "No alerts yet"
 EOF
 
 chmod +x monitor_daily.sh
@@ -324,18 +325,22 @@ crontab -e
 ### Environment Variables
 
 ```bash
-# Trading mode (paper or live)
-export TRADING_MODE=paper
-
 # Log level (DEBUG, INFO, WARNING, ERROR)
 export LOG_LEVEL=INFO
 
-# Data directory
-export DATA_DIR=/path/to/data
+# Disable ANSI colour in CLI output
+export NO_COLOR=1
 
-# Model path
-export MODEL_PATH=./lstm_price_difference_model.h5
+# Webhook URL for HIGH/CRITICAL alerts (Slack, Discord, PagerDuty, etc.)
+export ALERT_WEBHOOK_URL=https://hooks.slack.com/services/...
+
+# Enable LSTM + XGBoost ensemble predictions
+export ENSEMBLE_MODE=1
 ```
+
+Paper vs. live trading is controlled in code (`paper_trading` flag),
+not via an environment variable.  See option 6 in the CLI for
+credential setup.
 
 ### Risk Parameters
 
@@ -402,7 +407,7 @@ DEFAULT_TRADING_THRESHOLD = 0.3
 
 2. **Check model drift**:
    ```bash
-   grep "DRIFT ALERT" logs/*.log
+   cat logs/alerts.log          # structured JSON; HIGH/CRITICAL entries are urgent
    ```
 
 3. **Verify backups** (if configured)
@@ -481,9 +486,9 @@ See [RUNBOOK.md](RUNBOOK.md) for detailed troubleshooting.
    - Re-run credential setup
 
 3. **No trades executing**:
-   - Check `TRADING_MODE` environment variable
-   - Verify API credentials valid
+   - Verify Schwab API credentials are configured (`python main.py setup`)
    - Check trading threshold (may be too high)
+   - Ensure market is open (loop sleeps outside NYSE hours)
 
 4. **High losses**:
    - Emergency shutdown (see above)
@@ -506,7 +511,7 @@ See [RUNBOOK.md](RUNBOOK.md) for detailed troubleshooting.
 2. **Use batch predictions**
 3. **Optimize pandas operations**
 
-See [Performance Profiling](DEVELOPMENT.md#profiling) for details.
+See [Performance Profiling](PERFORMANCE_PROFILING.md) for details.
 
 ---
 
@@ -560,7 +565,7 @@ After successful deployment:
 4. **Set up alerts** (email/SMS) for critical events
 5. **Plan infrastructure** upgrades based on real usage
 
-See [Production Roadmap](../PRODUCTION_ROADMAP.md) for long-term plans.
+See the "Future Enhancements" section of [README](../README.md) for long-term plans.
 
 ---
 

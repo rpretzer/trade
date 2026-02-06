@@ -4,9 +4,9 @@
 
 The Stock Arbitrage Model is a production-grade algorithmic trading system that uses machine learning (LSTM neural networks) to predict price differences between correlated stocks and execute pairs trading strategies.
 
-**Version**: 2.0
-**Status**: Production-ready (8/10)
-**Last Updated**: 2026-01-31
+**Version**: 2.2
+**Status**: Staging-validated.  Paper-trade before committing real capital.
+**Last Updated**: 2026-02-06
 
 ---
 
@@ -107,10 +107,14 @@ The Stock Arbitrage Model is a production-grade algorithmic trading system that 
 
 #### Model Training (`train_model.py`)
 
-**Architecture**: LSTM Neural Network
+**Primary Model**: LSTM Neural Network
 - Layer 1: LSTM (50 units, dropout 0.2)
 - Layer 2: LSTM (30 units, dropout 0.2)
 - Layer 3: Dense (1 unit, linear activation)
+
+**Secondary Model**: XGBoost (gradient boosting)
+- Used in ensemble mode (LSTM 60% + XGBoost 40% by default)
+- Gated by `ENSEMBLE_MODE` environment variable
 
 **Training Process**:
 1. Load processed data
@@ -285,7 +289,7 @@ The Stock Arbitrage Model is a production-grade algorithmic trading system that 
 - **cryptography**: 41.0.7 (encryption)
 
 ### Development
-- **pytest**: 9.0.2 (testing - 198 tests)
+- **pytest**: 9.0.2 (testing - 287 tests)
 - **black**: 25.1.0 (formatting)
 - **pylint**: 3.3.4 (linting)
 
@@ -315,29 +319,44 @@ stock_arbitrage_model/
 │
 ├── Utilities
 │   ├── ml_utils.py               # ML helper functions
-│   ├── constants.py              # Application constants
+│   ├── constants.py              # Tickers, signals, feature names, config
 │   ├── sentiment_analysis.py     # Reddit sentiment
-│   └── options_data.py           # Options data fetching
+│   ├── options_data.py           # Options data fetching
+│   ├── alert_dispatch.py         # Webhook alert routing
+│   ├── storage_config.py         # Storage configuration
+│   └── emergency_shutdown.py     # Safety shutdown procedures
 │
 ├── Configuration
-│   ├── requirements.txt          # Production dependencies
-│   ├── requirements-dev.txt      # Dev dependencies
+│   ├── requirements.txt          # Core dependencies
+│   ├── requirements-lstm.txt     # + TensorFlow (LSTM training)
+│   ├── requirements-live.txt     # + schwab-py (live trading)
+│   ├── requirements-advanced.txt # + statsmodels, market calendars
+│   ├── requirements-full.txt     # All optional profiles
+│   ├── requirements-dev.txt      # Dev / test tools
+│   ├── install.sh                # One-command bootstrap
 │   ├── pytest.ini                # Test configuration
 │   ├── .pylintrc                 # Linting rules
 │   ├── .flake8                   # Code style
 │   └── pyproject.toml            # Tool configuration
 │
 ├── Testing
-│   └── tests/                    # 198 unit tests
-│       ├── test_error_handling.py
-│       ├── test_risk_management.py
-│       ├── test_trading_execution.py
-│       ├── test_security.py
-│       ├── test_model_management.py
-│       ├── test_backtest_integration.py
-│       ├── test_forced_buyin.py
+│   └── tests/                    # 287 unit tests
+│       ├── conftest.py                  # shared mocks (TensorFlow)
+│       ├── test_alert_dispatch.py
 │       ├── test_api_security.py
-│       └── test_model_drift.py
+│       ├── test_backtest_integration.py
+│       ├── test_backtest_strategy.py
+│       ├── test_data_validation.py
+│       ├── test_ensemble.py
+│       ├── test_error_handling.py
+│       ├── test_forced_buyin.py
+│       ├── test_model_drift.py
+│       ├── test_model_management.py
+│       ├── test_performance_profiling.py
+│       ├── test_regime_scenarios.py
+│       ├── test_risk_management.py
+│       ├── test_security.py
+│       └── test_trading_execution.py
 │
 ├── Deployment
 │   ├── run_daily_data_update.sh  # Cron job for data
@@ -399,17 +418,17 @@ stock_arbitrage_model/
 
 ### Current State
 - ✅ Audit logging (all trades, predictions)
-- ✅ Model drift detection
+- ✅ Model drift detection with alert routing to `logs/alerts.log`
+- ✅ Webhook alert dispatch (`alert_dispatch.py`) for HIGH/CRITICAL events
 - ✅ Risk metrics tracking
-- ⚠️  Basic console logging
+- ✅ Structured JSON logging with rotation (`logging_config.py`)
+- ✅ Circuit breaker (5 consecutive errors → halt + alert)
 - ❌ No metrics collection (Prometheus)
 - ❌ No distributed tracing
-- ❌ No alerting system
 
 ### Future Enhancements
 - Prometheus metrics export
 - Grafana dashboards
-- PagerDuty alerting
 - Application Performance Monitoring (APM)
 
 ---
@@ -439,6 +458,15 @@ See `requirements.txt` for exact versions.
 
 ## Version History
 
+### v2.2 (2026-02-06) - Full Pipeline Wiring
+- Multi-model ensemble (LSTM + XGBoost)
+- Model registry with A/B testing wired into training and inference
+- Continuous live-trading loop with graceful shutdown
+- Webhook alert dispatch for HIGH/CRITICAL events
+- Ticker parameterisation (single source of truth)
+- Regime-scenario backtests (COVID crash, bull, bear)
+- 287 comprehensive tests across 15 suites
+
 ### v2.0 (2026-01-31) - Production Hardening
 - 43/47 P0 issues fixed (91.5%)
 - 198 comprehensive tests
@@ -451,15 +479,12 @@ See `requirements.txt` for exact versions.
 - Basic LSTM model
 - Simple backtesting
 - No tests, minimal error handling
-- Toy implementation (2/10 production readiness)
 
 ---
 
 ## Related Documentation
 
 - [Deployment Guide](DEPLOYMENT.md)
-- [API Documentation](API.md)
 - [Incident Runbook](RUNBOOK.md)
-- [Developer Guide](DEVELOPMENT.md)
-- [Production Audit](../PRODUCTION_AUDIT.md)
-- [Production Roadmap](../PRODUCTION_ROADMAP.md)
+- [Performance Profiling](PERFORMANCE_PROFILING.md)
+- [Disclaimer](../DISCLAIMER.md)

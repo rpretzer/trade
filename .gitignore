@@ -6,6 +6,25 @@ __pycache__/
 .Python
 env/
 venv/
+venv_py312/
+
+# Schwab API credentials (DO NOT COMMIT!)
+schwab_credentials.json
+schwab_config.txt
+schwab_config.enc
+.schwab_key
+td_credentials.json
+
+# Configuration files
+date_range_config.txt
+market_config.txt
+selected_stocks.txt
+
+# Sentiment cache
+reddit_sentiment_cache.csv
+
+# Options cache
+options_volume_cache.csv
 ENV/
 build/
 develop-eggs/
@@ -32,6 +51,14 @@ wheels/
 *.pkl
 *.h5
 *.hdf5
+*.bak
+
+# Runtime state
+positions.json
+model_registry.json
+
+# Logs
+logs/
 
 # IDE
 .vscode/
@@ -47,3 +74,6 @@ Thumbs.db
 # Environment variables
 .env
 .env.local
+
+# XGBoost model
+xgb_price_difference_model.json

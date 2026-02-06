@@ -129,7 +129,7 @@ def fetch_reddit_sentiment(symbol, subreddit_name='wallstreetbets', limit=100,
                     sentiment_scores.append(score)
                     post_count += 1
         except Exception as e:
-            print(f"Warning: Error fetching Reddit posts: {e}")
+            logger.warning("Error fetching Reddit posts: %s", e)
         
         # Also try searching directly
         try:
@@ -160,7 +160,7 @@ def fetch_reddit_sentiment(symbol, subreddit_name='wallstreetbets', limit=100,
             }
             
     except Exception as e:
-        print(f"Error fetching Reddit sentiment for {symbol}: {e}")
+        logger.error("Error fetching Reddit sentiment for %s: %s", symbol, e)
         return {
             'mean_sentiment': 0.0,
             'median_sentiment': 0.0,
@@ -183,7 +183,7 @@ def fetch_reddit_sentiment_for_symbols(symbols, subreddit_name='wallstreetbets',
     results = {}
     
     for symbol in symbols:
-        print(f"Fetching Reddit sentiment for {symbol}...")
+        logger.info("Fetching Reddit sentiment for %s", symbol)
         results[symbol] = fetch_reddit_sentiment(symbol, subreddit_name, limit)
         time.sleep(1)  # Rate limiting
     
@@ -207,7 +207,7 @@ def load_sentiment_cache(cache_file=SENTIMENT_CACHE_FILE):
             df = pd.read_csv(cache_file, parse_dates=['Date'], index_col=['Date', 'Symbol'])
             return df
         except Exception as e:
-            print(f"Warning: Could not load sentiment cache: {e}")
+            logger.warning("Could not load sentiment cache: %s", e)
             return pd.DataFrame()
     return pd.DataFrame()
 
@@ -222,7 +222,7 @@ def save_sentiment_cache(cache_df, cache_file=SENTIMENT_CACHE_FILE):
     try:
         cache_df.to_csv(cache_file)
     except Exception as e:
-        print(f"Warning: Could not save sentiment cache: {e}")
+        logger.warning("Could not save sentiment cache: %s", e)
 
 def update_sentiment_cache(symbol, date, sentiment_data, cache_file=SENTIMENT_CACHE_FILE):
     """
@@ -318,13 +318,13 @@ def get_sentiment_for_date(symbol, target_date, cache_file=SENTIMENT_CACHE_FILE,
         days_ago = (datetime.now().date() - target_date.date()).days
         if 0 <= days_ago <= 7:
             try:
-                print(f"Fetching fresh sentiment for {symbol} on {target_date.date()}...")
+                logger.info("Fetching fresh sentiment for %s on %s", symbol, target_date.date())
                 sentiment_data = fetch_reddit_sentiment(symbol, limit=50)
                 if sentiment_data['count'] > 0:
                     update_sentiment_cache(symbol, target_date, sentiment_data, cache_file)
                     return sentiment_data['mean_sentiment']
             except Exception as e:
-                print(f"Warning: Could not fetch fresh sentiment: {e}")
+                logger.warning("Could not fetch fresh sentiment: %s", e)
     
     # Default: return 0 (neutral) if no data available
     return 0.0
@@ -393,12 +393,12 @@ def build_historical_sentiment_cache(symbols, start_date, end_date,
         limit: Number of posts to fetch per symbol
         delay_between_symbols: Seconds to wait between symbols
     """
-    print(f"Building sentiment cache for {len(symbols)} symbols from {start_date} to {end_date}...")
+    logger.info("Building sentiment cache for %d symbols from %s to %s", len(symbols), start_date, end_date)
     
     cache_df = load_sentiment_cache(cache_file)
     
     for symbol in symbols:
-        print(f"\nProcessing {symbol}...")
+        logger.info("Processing %s", symbol)
         try:
             # Fetch current sentiment
             sentiment_data = fetch_reddit_sentiment(symbol, subreddit_name, limit)
@@ -408,12 +408,12 @@ def build_historical_sentiment_cache(symbols, start_date, end_date,
                 # (In production, you'd want to fetch daily and store)
                 current_date = pd.Timestamp(end_date).normalize()
                 update_sentiment_cache(symbol, current_date, sentiment_data, cache_file)
-                print(f"  {symbol}: Mean sentiment = {sentiment_data['mean_sentiment']:.4f} (from {sentiment_data['count']} posts)")
+                logger.info("%s: Mean sentiment = %.4f (from %d posts)", symbol, sentiment_data['mean_sentiment'], sentiment_data['count'])
             else:
-                print(f"  {symbol}: No sentiment data found")
+                logger.info("%s: No sentiment data found", symbol)
             
             time.sleep(delay_between_symbols)  # Rate limiting
         except Exception as e:
-            print(f"  Error processing {symbol}: {e}")
+            logger.error("Error processing %s: %s", symbol, e)
     
-    print(f"\nSentiment cache updated: {cache_file}")
+    logger.info("Sentiment cache updated: %s", cache_file)

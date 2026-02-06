@@ -183,8 +183,8 @@ class CredentialManager:
 
         # If no key file exists, create one
         if master_password is None:
-            print("🔐 Setting up secure credential storage...")
-            print("You can use a master password for extra security, or press Enter to use system-generated key.")
+            logger.info("Setting up secure credential storage")
+            logger.info("You can use a master password for extra security, or press Enter to use system-generated key.")
             master_password = getpass.getpass("Enter master password (or press Enter for auto-generated): ")
             if not master_password:
                 master_password = None
@@ -312,7 +312,7 @@ class CredentialManager:
             # If decryption fails, might need password
             if "InvalidToken" in str(e) or "Invalid key" in str(e):
                 if master_password is None:
-                    print("🔐 Encrypted credentials require a master password.")
+                    logger.info("Encrypted credentials require a master password.")
                     master_password = getpass.getpass("Enter master password: ")
                     try:
                         # Try with password

@@ -3,9 +3,12 @@ Data Quality Validation Module
 Validates stock data before use in models or trading
 """
 
+import logging
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+
+logger = logging.getLogger(__name__)
 
 
 class DataQualityError(Exception):
@@ -189,48 +192,48 @@ def validate_technical_indicators(df, symbols):
 
 def print_validation_report(issues):
     """
-    Print validation report in a readable format.
+    Log validation report at appropriate severity levels.
 
     Args:
         issues: List of (level, message) tuples
     """
     if not issues:
-        print("✓ Data validation passed - no issues found")
+        logger.info("Data validation passed - no issues found")
         return
 
-    print("\n" + "=" * 70)
-    print("DATA VALIDATION REPORT")
-    print("=" * 70)
+    logger.info("=" * 70)
+    logger.info("DATA VALIDATION REPORT")
+    logger.info("=" * 70)
 
     errors = [msg for level, msg in issues if level == 'ERROR']
     warnings = [msg for level, msg in issues if level == 'WARNING']
     infos = [msg for level, msg in issues if level == 'INFO']
 
     if errors:
-        print(f"\n❌ ERRORS ({len(errors)}):")
+        logger.error("ERRORS (%d):", len(errors))
         for i, error in enumerate(errors, 1):
-            print(f"  {i}. {error}")
+            logger.error("  %d. %s", i, error)
 
     if warnings:
-        print(f"\n⚠️  WARNINGS ({len(warnings)}):")
+        logger.warning("WARNINGS (%d):", len(warnings))
         for i, warning in enumerate(warnings, 1):
-            print(f"  {i}. {warning}")
+            logger.warning("  %d. %s", i, warning)
 
     if infos:
-        print(f"\nℹ️  INFO ({len(infos)}):")
-        for i, info in enumerate(infos, 1):
-            print(f"  {i}. {info}")
+        logger.info("INFO (%d):", len(infos))
+        for i, info_msg in enumerate(infos, 1):
+            logger.info("  %d. %s", i, info_msg)
 
-    print("\n" + "=" * 70)
+    logger.info("=" * 70)
 
     if errors:
-        print("❌ VALIDATION FAILED - Data quality issues must be fixed")
+        logger.error("VALIDATION FAILED - Data quality issues must be fixed")
     elif warnings:
-        print("⚠️  VALIDATION PASSED WITH WARNINGS - Review issues above")
+        logger.warning("VALIDATION PASSED WITH WARNINGS - Review issues above")
     else:
-        print("✓ VALIDATION PASSED - Data quality is good")
+        logger.info("VALIDATION PASSED - Data quality is good")
 
-    print("=" * 70 + "\n")
+    logger.info("=" * 70)
 
 
 if __name__ == "__main__":

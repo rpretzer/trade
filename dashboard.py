@@ -12,6 +12,12 @@ import os
 import time
 import sys
 import subprocess
+import json
+from constants import SIGNAL_BUY_LONG, SIGNAL_BUY_SHORT, TICKER_LONG, TICKER_SHORT
+
+# Derive CSV column names from ticker constants (backtest writes lowercase)
+_LONG_PRICE_COL = f'{TICKER_LONG.lower()}_price'
+_SHORT_PRICE_COL = f'{TICKER_SHORT.lower()}_price'
 
 # Try importing TensorFlow/Keras for model predictions
 try:
@@ -419,9 +425,9 @@ def main():
                         """)
                 elif latest_signal:
                     # Display signal with color coding
-                    if latest_signal == 'Buy AAPL, Sell MSFT':
+                    if latest_signal == SIGNAL_BUY_LONG:
                         st.success(f"🟢 **{latest_signal}**")
-                    elif latest_signal == 'Buy MSFT, Sell AAPL':
+                    elif latest_signal == SIGNAL_BUY_SHORT:
                         st.info(f"🔵 **{latest_signal}**")
                     else:
                         st.warning(f"🟡 **{latest_signal}**")
@@ -451,10 +457,10 @@ def main():
             
             if not trades_df.empty:
                 # Get last 10 trades
-                recent_trades = trades_df.tail(10)[['date', 'signal', 'aapl_price', 'msft_price', 'profit']].copy()
+                recent_trades = trades_df.tail(10)[['date', 'signal', _LONG_PRICE_COL, _SHORT_PRICE_COL, 'profit']].copy()
                 recent_trades['date'] = recent_trades['date'].dt.strftime('%Y-%m-%d')
-                recent_trades['aapl_price'] = recent_trades['aapl_price'].apply(format_currency)
-                recent_trades['msft_price'] = recent_trades['msft_price'].apply(format_currency)
+                recent_trades[_LONG_PRICE_COL] = recent_trades[_LONG_PRICE_COL].apply(format_currency)
+                recent_trades[_SHORT_PRICE_COL] = recent_trades[_SHORT_PRICE_COL].apply(format_currency)
                 
                 # Format profit with color
                 def format_profit(value):
@@ -514,13 +520,13 @@ def main():
         filtered_df = filtered_df[filtered_df['signal'] != 'Hold']
     
     # Display filtered results
-    display_df = filtered_df[['date', 'signal', 'aapl_price', 'msft_price', 
+    display_df = filtered_df[['date', 'signal', _LONG_PRICE_COL, _SHORT_PRICE_COL,
                              'predicted_diff', 'actual_diff', 'profit', 'return_pct']].copy()
-    
+
     # Format columns
     display_df['date'] = display_df['date'].dt.strftime('%Y-%m-%d')
-    display_df['aapl_price'] = display_df['aapl_price'].apply(format_currency)
-    display_df['msft_price'] = display_df['msft_price'].apply(format_currency)
+    display_df[_LONG_PRICE_COL] = display_df[_LONG_PRICE_COL].apply(format_currency)
+    display_df[_SHORT_PRICE_COL] = display_df[_SHORT_PRICE_COL].apply(format_currency)
     display_df['profit'] = display_df['profit'].apply(format_currency)
     display_df['return_pct'] = display_df['return_pct'].apply(format_percentage)
     display_df['predicted_diff'] = display_df['predicted_diff'].apply(lambda x: f"{x:.4f}")
@@ -537,6 +543,86 @@ def main():
         mime="text/csv"
     )
     
+    # ── Alert Log ──────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("🚨 Alert Log")
+
+    alert_log_path = os.path.join('logs', 'alerts.log')
+    if os.path.exists(alert_log_path):
+        try:
+            lines = []
+            with open(alert_log_path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        lines.append(line)
+            # Show last 50 entries, newest first
+            for raw in reversed(lines[-50:]):
+                try:
+                    entry = json.loads(raw)
+                    severity = entry.get('severity', 'INFO').upper()
+                    msg = entry.get('message', raw)
+                    ts = entry.get('timestamp', '')
+                    label = f"**[{ts}]** {msg}" if ts else msg
+                    if severity in ('CRITICAL', 'HIGH'):
+                        st.error(label)
+                    elif severity in ('WARNING', 'MEDIUM'):
+                        st.warning(label)
+                    else:
+                        st.info(label)
+                except (json.JSONDecodeError, AttributeError):
+                    st.text(raw)
+        except Exception as e:
+            st.warning(f"Could not read alert log: {e}")
+    else:
+        st.info("No alert log found. Alerts will appear here when the trading loop is running.")
+
+    # ── Model Registry ────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("🧠 Model Registry")
+
+    try:
+        from model_management import ModelRegistry, ModelStatus
+        registry = ModelRegistry()
+        all_models = registry.list_models()
+        if all_models:
+            rows = []
+            for mv in all_models:
+                status_str = mv.status.value if isinstance(mv.status, ModelStatus) else str(mv.status)
+                rows.append({
+                    'Version': mv.version,
+                    'Type': mv.model_type,
+                    'Status': status_str,
+                    'Registered': mv.registered_date[:19] if hasattr(mv, 'registered_date') and mv.registered_date else '',
+                    'Val MAE': f"{mv.metrics.get('val_mae', 'N/A')}" if hasattr(mv, 'metrics') and mv.metrics else 'N/A',
+                    'Traffic %': f"{mv.traffic_percentage}%" if hasattr(mv, 'traffic_percentage') else 'N/A',
+                })
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        else:
+            st.info("No models registered yet. Train a model to populate the registry.")
+    except ImportError:
+        st.info("Model registry module not available.")
+    except Exception as e:
+        st.info(f"Could not load model registry: {e}")
+
+    # ── Live Trading Status ───────────────────────────────────────
+    st.markdown("---")
+    st.subheader("🔴 Live Trading Status")
+
+    positions_path = 'positions.json'
+    if os.path.exists(positions_path):
+        try:
+            with open(positions_path, 'r') as f:
+                positions = json.load(f)
+            if positions:
+                st.dataframe(pd.DataFrame(positions), use_container_width=True, hide_index=True)
+            else:
+                st.info("No active positions.")
+        except Exception as e:
+            st.warning(f"Could not read positions file: {e}")
+    else:
+        st.info("No active trading session. Start `python main.py live` to begin.")
+
     # Auto-refresh logic
     if auto_refresh:
         time.sleep(refresh_interval)
